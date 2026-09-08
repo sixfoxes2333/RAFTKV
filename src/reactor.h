@@ -16,8 +16,8 @@ class Connection
 {
 public:
     char pending[2048]; //缓存还未写完的数据
-    int pending_len; //还剩多少未发送
-    int pending_off; //从哪里开始发送
+    int pending_len = 0; //还剩多少未发送
+    int pending_off = 0; //从哪里开始发送
     EventCallback on_read;
     EventCallback on_write;
 
