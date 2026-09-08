@@ -87,6 +87,14 @@ void handle_accept(Connection *lc)
     }
 
     setnonblocking(connfd);
+
+    // //测试注入 : 缩小发送缓冲，强制触发短写
+
+    // int sndbuf = 4096;
+    // setsockopt(connfd,SOL_SOCKET,SO_SNDBUF,&sndbuf,sizeof(sndbuf));
+
+    // //测试完注释掉
+
     Connection *c = new Connection(connfd,lc->reactor());
     c->on_read = handle_read;
     c->on_write = handle_write;
