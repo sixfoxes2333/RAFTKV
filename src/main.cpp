@@ -16,13 +16,12 @@ void setnonblocking(int fd)
 //短写续写
 void handle_write(Connection* c)
 {
-    while(c->pending_len > 0)
+    while(c->out_.readable() > 0)
     {   //write 返回成功写入的字节数
-        int n = write(c->fd(),c->pending + c->pending_off,c->pending_len);
+        int n = write(c->fd(),c->out_.peek(),c->out_.readable());
         if(n > 0)
         {
-            c->pending_len -= n;
-            c->pending_off += n;
+            c->out_.retrieve(n);
         }
         else if(n == 1 && errno == EAGAIN)
         {
@@ -49,12 +48,12 @@ void handle_read(Connection* c)
     int len = read(c->fd(),buf,sizeof(buf));
     if(len > 0)
     {
-        memcpy(c->pending,buf,len);
-        c->pending_len = len;
-        c->pending_off = 0;
+        c->in_.append(buf,len);
 
+        //echo
+        c->out_.append(c->in_.peek(),c->in_.readable()); //将 in_ 的内容搬去 out_
+        c->in_.retrieve(c->in_.readable());
 
-        //立刻回写，以后再更改为收发
         handle_write(c);
 
     }

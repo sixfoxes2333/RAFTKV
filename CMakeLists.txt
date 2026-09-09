@@ -6,4 +6,5 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(kvserver
 src/main.cpp
-src/reactor.cpp)
+src/reactor.cpp
+src/buffer.cpp)
