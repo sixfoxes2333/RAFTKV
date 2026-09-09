@@ -5,6 +5,9 @@
 #include<cerrno>
 #include<iostream>
 #include<cstring>
+#include<arpa/inet.h>
+
+const int MAX_MESSAGE = 16 * 1024 *1024; //防止恶意长度炸内存
 
 //设置非阻塞模式
 void setnonblocking(int fd)
@@ -40,6 +43,53 @@ void handle_write(Connection* c)
     c->reactor()->mod_event(c->fd(),c,EPOLLIN);
 }
 
+//处理消息
+void handle_message(Connection *c , const char *payload , size_t len)
+{
+    uint32_t be = htonl(len);
+
+    //echo 以后再改 SET/GET
+
+    c->out_.append(reinterpret_cast<const char*>(&be),4); //追加长度头
+    c->out_.append(payload,len);
+    handle_write(c);
+}
+
+
+//检测切分
+void process_frames(Connection *c)
+{
+    while(c->in_.readable() >= 4) //长度头就占四字节
+    {
+        uint32_t len;
+        memcpy(&len,c->in_.peek(),4); //取前 4 字节
+        len = ntohl(len); //大端转换为主机序
+
+        //恶意长度
+        if(len > MAX_MESSAGE)
+        {
+            std::cout << "bad len " << len << " from fd = " << c->fd() << std::endl;
+            close(c->fd());
+            delete c;
+            return;
+        }
+        
+        //半包 等待下次事件
+        if(c->in_.readable() < 4 + len)
+        {
+            break;
+        }
+
+        //完整一条消息
+        handle_message(c,c->in_.peek() + 4,len);
+
+        c->in_.retrieve(4+len);
+        
+    }
+}
+
+
+
 //读侧回调
 void handle_read(Connection* c)
 {
@@ -50,11 +100,8 @@ void handle_read(Connection* c)
     {
         c->in_.append(buf,len);
 
-        //echo
-        c->out_.append(c->in_.peek(),c->in_.readable()); //将 in_ 的内容搬去 out_
-        c->in_.retrieve(c->in_.readable());
-
-        handle_write(c);
+        //检测切分
+        process_frames(c);
 
     }
     else if(len == 0)
