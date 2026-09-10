@@ -8,3 +8,6 @@ add_executable(kvserver
 src/main.cpp
 src/reactor.cpp
 src/buffer.cpp)
+
+add_executable(kvclient
+src/client.cpp)
