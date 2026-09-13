@@ -11,3 +11,7 @@ src/buffer.cpp)
 
 add_executable(kvclient
 src/client.cpp)
+
+add_executable(test_storage
+tests/test_storage.cpp
+src/storage.cpp)

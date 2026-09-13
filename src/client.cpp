@@ -8,12 +8,15 @@
 #include<unistd.h>
 
 
-//包帧发送
+//将一块长度的内存数据包装为 TCP 数据帧并发送到 socket 缓冲区
 void send_frame(int fd,const char* data,size_t len)
 {
     uint32_t be = htonl(len);
-    const char* p = reinterpret_cast<const char*>(&be);
+    const char* p = reinterpret_cast<const char*>(&be); //len 转换为长度头
+
+
     size_t sent = 0;
+    //while 循环处理短写
     while(sent < 4)
     {
         int n = write(fd,p + sent,4-sent);
@@ -29,6 +32,7 @@ void send_frame(int fd,const char* data,size_t len)
     }
     
     sent = 0;
+    //while 循环处理短写
     while(sent < len)
     {
         int n = write(fd,data + sent,len - sent);
@@ -46,6 +50,7 @@ void send_frame(int fd,const char* data,size_t len)
 //读一条完整帧内容，对端断开返回 false
 bool recv_frame(int fd,std::string &payload)
 {
+    //包头读取
     char header[4];
     size_t got = 0;
     while(got < 4) //读长度头
@@ -66,11 +71,13 @@ bool recv_frame(int fd,std::string &payload)
         got += n;
     }
 
+    //取到要接收的数据的长度
     uint32_t len;
     memcpy(&len,header,4);
     len = ntohl(len); //大端转换为主机序
-
     payload.resize(len);
+
+
     got = 0;
     while(got < len)
     {
@@ -96,6 +103,7 @@ bool recv_frame(int fd,std::string &payload)
 
 int main(int argc,char *argv[])
 {
+    //确保用户在启动程序时至少传入一个待发送的消息
     if(argc < 2)
     {
         std::cout << "usage: " << argv[0] << " msg1 msg2 ..." << std::endl;
@@ -111,12 +119,13 @@ int main(int argc,char *argv[])
     inet_pton(AF_INET,"127.0.0.1",&addr.sin_addr);
     connect(fd,(struct sockaddr*)&addr,sizeof(addr));
 
+    //从 argv[1] 开始，因为 [0] 是程序名字
     for(int i = 1 ; i < argc ; i++)
     {
         send_frame(fd,argv[i],strlen(argv[i]));
     }
 
-    shutdown(fd,SHUT_WR);
+    shutdown(fd,SHUT_WR); //半关闭 只关闭写
 
     std::string reply;
     while(recv_frame(fd,reply))
