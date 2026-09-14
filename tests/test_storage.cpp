@@ -3,6 +3,7 @@
 #include<iostream>
 #include<iterator>
 #include<string>
+#include<cstdio>
 
 //简易检查宏 程序持续跑完 打印失败在第几行  统一返回失败码
 static int g_failed = 0;
@@ -108,6 +109,53 @@ int main()
     std::string bad_val = r1;
     bad_val[14] ^= 0x01;
     CHECK(kv::decode_record(bad_val.data(), bad_val.size(), rec, consumed) == false);
+
+
+    std::cout << "[6] 文件头 " << std::endl;
+    {
+        //新建文件
+        std::remove("/tmp/kv_test_a.log");
+        {
+            kv::Storage s("/tmp/kv_test_a.log");
+            CHECK(s.good());
+        }
+        std::ifstream fa("/tmp/kv_test_a.log",std::ios::binary);
+        char hdr[8] = {0};
+        fa.read(hdr,8);
+
+        CHECK(fa.gcount() == 8);
+        CHECK(std::string(hdr,4) == "KVDB");
+        CHECK(hdr[4] == 0 && hdr[5] == 0 && hdr[6] == 0 && hdr[7] == 1);
+
+        //已有合法文件
+        {
+            kv::Storage s("/tmp/kv_test_a.log");
+            CHECK(s.good());
+        }
+
+        //非 kv 文件
+        {
+            std::ofstream fb("/tmp/kv_test_b.log",std::ios::binary);
+            fb << "this is not a kv data file";
+        }
+
+        {
+            kv::Storage s("/tmp/kv_test_b.log");
+            CHECK(!s.good());
+        }
+
+        //小于 8 字节的文件
+        std::ofstream fc("/tmp/kv_test_c.log",std::ios::binary);
+        fc << "abc";
+        fc.close();
+        kv::Storage s("/tmp/kv_test_c.log");
+        CHECK(!s.good());
+
+
+    }
+
+
+
 
     //汇总
     if (g_failed == 0) 

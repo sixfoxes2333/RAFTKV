@@ -45,6 +45,11 @@ namespace kv
         explicit Storage(const std::string &path); //禁用隐式转换，打开/新建文件，顺便写上 recover() 以重建 index_
         ~Storage();
 
+        bool good() const
+        {
+            return fd_ >= 0; //打开是否成功
+        }
+
         bool put(const std::string &key,const std::string &value); //encode 并追加写入或更新已存在的 key
         bool get(const std::string &key,std::string &value); //根据 key 查询 valule
         bool del(const std::string &key); //删除指定 key 并追加墓碑标记
