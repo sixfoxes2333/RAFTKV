@@ -126,7 +126,7 @@ namespace kv
         return crc ^ 0xFFFFFFFFu;
     }
 
-    std::string encode_record(uint8_t type,const std::string &key,const std::string &value)
+    std::string encode_record(RecordType type,const std::string &key,const std::string &value)
     {
         std::string body;
         body.push_back(static_cast<char>(type)); //type 1 字节
@@ -161,6 +161,12 @@ namespace kv
         uint32_t klen = read_be32(buf+5); //偏移 5
         uint32_t vlen = read_be32(buf+9); //偏移 9
 
+        //合法性检查
+        if(type != static_cast<uint8_t>(RecordType::Set) && type != static_cast<uint8_t>(RecordType::Del))
+        {
+            return false;
+        }
+
         //若超过上限，可能是因为损坏
         if(klen > MAX_KEY || vlen > MAX_VALUE)
         {
@@ -183,7 +189,7 @@ namespace kv
         }
 
         //全部校验都通过则填写输出参数
-        out.type = type;
+        out.type = static_cast<RecordType>(type);
         out.key.assign(buf+13,klen); //清空并重新赋值
         out.value.assign(buf+13+klen,vlen); //清空并重新赋值
 
@@ -286,10 +292,51 @@ namespace kv
     }
 
 
+    bool Storage::put(const std::string &key,const std::string &value)
+    {
+        //合法性检查
+        if(key.empty() || key.size() > MAX_KEY || value.size() > MAX_VALUE)
+        {
+            return false;
+        }
+
+        //编码 转换为 SET 记录
+        std::string rec = encode_record(RecordType::Set,key,value);
+
+        //记录落在文件末尾，先取当前位置作为偏移 (追加)
+        off_t offset = lseek(fd_,0,SEEK_END);
+        if(offset < 0)
+        {
+            return false;
+        }
+
+        //追加写
+        if(!write_all(fd_,rec.data(),rec.size()))
+        {
+            return false;
+        }
+
+        //按照策略
+        if(sync_on_put_ && fsync(fd_) != 0)
+        {
+            return false;
+        }
+
+        //更新内存索引 指向最新
+        index_[key] = IndexEntry{static_cast<uint64_t>(offset),static_cast<uint32_t>(rec.size())};
+
+        return true;
+
+    }
 
 
-
-
+    void Storage::dump_index(std::ostream &os) const
+    {
+        for(const auto &kv : index_)
+        {
+            os << " " << kv.first << " -> offset = " << kv.second.offset << " len = " << kv.second.total_len << "\n";
+        }
+    }
 
 
 

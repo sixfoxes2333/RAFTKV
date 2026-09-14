@@ -10,10 +10,10 @@ static int g_failed = 0;
 #define CHECK(cond)                                                             \
     do {                                                                        \
         if (cond)                                                               \
-            std::cout << "  ok   : " #cond << std::endl;                                  \
+            std::cout << "  ok   : " #cond << std::endl;                        \
         else {                                                                  \
-            std::cout << "  FAIL : " #cond "   (line " << __LINE__ << ")"            \
-                 << std::endl;                                                       \
+            std::cout << "  FAIL : " #cond "   (line " << __LINE__ << ")"       \
+                 << std::endl;                                                  \
             g_failed++;                                                         \
         }                                                                       \
     } while (0)
@@ -49,13 +49,13 @@ int main()
 
     //SET 记录编码
     std::cout << "[2] SET 记录编码" << std::endl;
-    std::string r1 = kv::encode_record(1,"a","1");
+    std::string r1 = kv::encode_record(kv::RecordType::Set,"a","1");
     CHECK(r1.size() == 15);
     CHECK(hex(r1) == "20 84 55 73 01 00 00 00 01 00 00 00 01 61 31");
 
     //DEL 记录编码
     std::cout << "[3] DEL 记录编码" << std::endl;
-    std::string r2 = kv::encode_record(2,"a","");
+    std::string r2 = kv::encode_record(kv::RecordType::Del,"a","");
     CHECK(r2.size() == 14);
     CHECK(hex(r2) == "16 96 3a 20 02 00 00 00 01 00 00 00 00 61");
 
@@ -77,14 +77,14 @@ int main()
 
     // 第一条
     CHECK(kv::decode_record(all.data(), all.size(), rec, consumed));
-    CHECK(rec.type == 1);
+    CHECK(rec.type == kv::RecordType::Set);
     CHECK(rec.key == "a");
     CHECK(rec.value == "1");
     CHECK(consumed == 15);
 
     // 第二条：从 consumed 处继续
     CHECK(kv::decode_record(all.data() + consumed, all.size() - consumed, rec, consumed));
-    CHECK(rec.type == 2);
+    CHECK(rec.type == kv::RecordType::Del);
     CHECK(rec.key == "a");
     CHECK(rec.value == "");
     CHECK(consumed == 14);
@@ -152,6 +152,25 @@ int main()
         CHECK(!s.good());
 
 
+    }
+
+    std::cout << "[7] put" << std::endl;
+    const char *PATH_PUT = "/tmp/kv_test_put.log";
+    std::remove(PATH_PUT);
+    {
+        kv::Storage s(PATH_PUT);
+        CHECK(s.good());
+        CHECK(s.put("a", "1"));
+        CHECK(s.put("b", "2"));
+        CHECK(s.put("a", "9"));        // 覆盖写：再追加一条，索引改指新的
+        CHECK(s.key_count() == 2);     // 索引里仍然只有 a、b 两个 key
+        CHECK(!s.put("", "x"));        // 空 key 拒绝
+        s.dump_index(std::cout);       // 打印索引
+    }
+
+    {
+        std::ifstream f(PATH_PUT,std::ios::binary | std::ios::ate);
+        CHECK(f.tellg() == 53);
     }
 
 
