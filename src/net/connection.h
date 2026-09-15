@@ -21,6 +21,17 @@ public:
     EventCallback on_write;
 
     Connection(int fd,Reactor *r):fd_(fd),reactor_(r){}
+    ~Connection(); //close(fd_) 唯一的关闭出口
+
+    void mark_closing()
+    {
+        closing_ = true;
+    }
+
+    bool closing()const
+    {
+        return closing_;
+    }
 
     int fd() const
     {
@@ -36,6 +47,7 @@ private:
     int fd_;
     Reactor *reactor_;
 
+    bool closing_ = false; //申请关闭标识
 
 };
 

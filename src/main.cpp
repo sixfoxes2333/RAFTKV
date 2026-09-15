@@ -6,6 +6,7 @@
 #include<iostream>
 #include<cstring>
 #include<arpa/inet.h>
+#include<memory>
 
 const int MAX_MESSAGE = 16 * 1024 *1024; //防止恶意长度炸内存
 
@@ -34,8 +35,7 @@ void handle_write(Connection* c)
         }
         else
         {
-            close(c->fd());
-            delete c;
+            c->reactor()->request_close(c);
             return;
         }
     }
@@ -69,8 +69,7 @@ void process_frames(Connection *c)
         if(len > MAX_MESSAGE)
         {
             std::cout << "bad len " << len << " from fd = " << c->fd() << std::endl;
-            close(c->fd());
-            delete c;
+            c->reactor()->request_close(c);
             return;
         }
         
@@ -82,6 +81,12 @@ void process_frames(Connection *c)
 
         //完整一条消息
         handle_message(c,c->in_.peek() + 4,len);
+
+        //回调可能已申请关闭 (比如 发送失败) 
+        if(c->closing())
+        {
+            return;
+        }
 
         c->in_.retrieve(4+len);
         
@@ -107,8 +112,7 @@ void handle_read(Connection* c)
     else if(len == 0)
     {
         std::cout << "\n peer closed fd = " << c->fd() << " \n" <<std::endl;
-        close(c->fd());
-        delete c;  
+        c->reactor()->request_close(c); 
     }
     else
     {
@@ -116,8 +120,7 @@ void handle_read(Connection* c)
         {
             return;
         }
-        close(c->fd());
-        delete c;
+        c->reactor()->request_close(c);
     }
 }
 
@@ -141,10 +144,13 @@ void handle_accept(Connection *lc)
 
     // //测试完注释掉
 
-    Connection *c = new Connection(connfd,lc->reactor());
+    auto c = std::make_unique<Connection>(connfd,lc->reactor());
+
     c->on_read = handle_read;
     c->on_write = handle_write;
-    lc->reactor()->add_event(connfd,c,EPOLLIN);
+
+    lc->reactor()->add_connection(connfd,std::move(c),EPOLLIN);
+    
     std::cout << "\n new conn fd = " << connfd << " \n" << std::endl;
 }
 
@@ -173,10 +179,13 @@ int main()
     listen(listenfd,5);
 
     Reactor reactor;
-    Connection *lc = new Connection(listenfd,&reactor);
+
+    auto lc = std::make_unique<Connection>(listenfd,&reactor);
+
     lc->on_read = handle_accept;
     lc->on_write = nullptr;
-    reactor.add_event(listenfd,lc,EPOLLIN);
+    
+    reactor.add_connection(listenfd,std::move(lc),EPOLLIN);
 
     reactor.loop();
 
