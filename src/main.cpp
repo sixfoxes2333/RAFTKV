@@ -21,26 +21,44 @@ void setnonblocking(int fd)
 void handle_write(Connection* c)
 {
     while(c->out_.readable() > 0)
-    {   //write 返回成功写入的字节数
-        int n = write(c->fd(),c->out_.peek(),c->out_.readable());
+    {   //send 返回成功写入的字节数
+        //MSG_NOSIGNAL 对端已关闭时不产生 SIGPIPE (不然进程会被默认信号杀掉)
+        ssize_t n = send(c->fd(),c->out_.peek(),c->out_.readable(),MSG_NOSIGNAL);
         if(n > 0)
         {
             c->out_.retrieve(n);
         }
-        else if(n == 1 && errno == EAGAIN)
+        else if(n < 0 && errno == EINTR)
+        {
+            //被信号打断 什么都没写，重试即可
+            continue;
+        }
+        else if(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             //缓冲区满，等待 EPOLLOUT
-            c->reactor()->mod_event(c->fd(),c,EPOLLOUT);
+            c->enable_write();
+            return;
+        }
+        else if(n == 0) //理论上不会发生
+        {
             return;
         }
         else
         {
+            //真错误
             c->reactor()->request_close(c);
             return;
         }
     }
 
-    c->reactor()->mod_event(c->fd(),c,EPOLLIN);
+    if(c->peer_closed())
+    {
+        c->reactor()->request_close(c); //对端不会再发，则本体也不再发送
+        return;
+    }
+
+    c->disable_write(); //掩码回到 EPOLLIN | EPOLLRDHUP
+
 }
 
 //处理消息
@@ -107,12 +125,29 @@ void handle_read(Connection* c)
 
         //检测切分
         process_frames(c);
-
+        return;
     }
     else if(len == 0)
     {
-        std::cout << "\n peer closed fd = " << c->fd() << " \n" <<std::endl;
-        c->reactor()->request_close(c); 
+        std::cout << "\n peer closed fd = " << c->fd() << " \n" <<std::endl; //对端半关闭，不再有新数据
+        
+        c->mark_peer_closed();
+
+        //没有待发数据
+        if(c->out_.readable() == 0)
+        {
+            c->reactor()->request_close(c);
+        }
+        else
+        {
+            //还有回复未发送
+            //关掉读，再等 EPOLLOUT 把数据发完
+            c->close_read();
+            c->enable_write();
+        }
+
+        return;
+        
     }
     else
     {
@@ -149,7 +184,7 @@ void handle_accept(Connection *lc)
     c->on_read = handle_read;
     c->on_write = handle_write;
 
-    lc->reactor()->add_connection(connfd,std::move(c),EPOLLIN);
+    lc->reactor()->add_connection(connfd,std::move(c),CONN_BASE_EVENTS);
     
     std::cout << "\n new conn fd = " << connfd << " \n" << std::endl;
 }
@@ -185,7 +220,7 @@ int main()
     lc->on_read = handle_accept;
     lc->on_write = nullptr;
     
-    reactor.add_connection(listenfd,std::move(lc),EPOLLIN);
+    reactor.add_connection(listenfd,std::move(lc),CONN_BASE_EVENTS);
 
     reactor.loop();
 

@@ -125,18 +125,45 @@ def main() -> int:
         time.sleep(SEND_BLOCK_TIME)
 
         # ---- 开始读：慢速分块，给服务器制造持续压力 ----
+        # 注意：服务器回的是同样带长度头的帧 [4 字节大端长度][内容]，
+        # 必须先精确吃掉 4 字节帧头，再读内容，否则等于拿帧头跟内容比对。
         got = bytearray()
         early_eof = False
-        while len(got) < len(payload):
-            if time.time() - t0 > READ_TIMEOUT:
-                print("  !! 读取超时")
-                break
-            chunk = s.recv(4096)
-            if not chunk:
-                early_eof = True               # 对端提前关闭：当前 bug 的症状
-                break
-            got += chunk
-            time.sleep(0.001)                  # 1ms/4KB ≈ 4MB/s，慢于服务器写入
+
+        def recv_exact(n: int) -> bytes:
+            """精确读 n 字节；提前关闭/超时时返回已读到的部分（可能为空）"""
+            buf = bytearray()
+            while len(buf) < n:
+                if time.time() - t0 > READ_TIMEOUT:
+                    print("  !! 读取超时")
+                    return bytes(buf)
+                chunk = s.recv(n - len(buf))
+                if not chunk:
+                    return bytes(buf)              # 对端提前关闭
+                buf += chunk
+            return bytes(buf)
+
+        header = recv_exact(4)
+        if len(header) < 4:
+            early_eof = True                   # 连帧头都没读全：服务器提前关了连接
+            print(f"  只收到 {len(header)} 字节帧头就 EOF")
+        else:
+            reply_len = struct.unpack(">I", header)[0]
+            print(f"  回复帧头声明长度 = {reply_len} 字节")
+            if reply_len != len(payload):
+                print(f"  !! 回复长度和请求不一致（期望 {len(payload)}）")
+            # 防御：长度头离谱时不去读它
+            target = reply_len if 0 < reply_len <= 64 * 1024 * 1024 else len(payload)
+            while len(got) < target:
+                if time.time() - t0 > READ_TIMEOUT:
+                    print("  !! 读取超时")
+                    break
+                chunk = s.recv(4096)
+                if not chunk:
+                    early_eof = True           # 对端提前关闭：当前 bug 的症状
+                    break
+                got += chunk
+                time.sleep(0.001)              # 1ms/4KB ≈ 4MB/s，慢于服务器写入
 
         elapsed = time.time() - t0
         s.close()

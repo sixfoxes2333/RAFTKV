@@ -28,15 +28,18 @@ void Reactor::loop()
                 continue;
             }
 
-            if(ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))
+            if(ev & (EPOLLERR | EPOLLHUP))
             {
                 request_close(c);
+                continue;
             }
-            else if(ev & EPOLLIN && c->on_read)
+            
+            if(ev & (EPOLLIN | EPOLLRDHUP)&& c->on_read)
             {
                 c->on_read(c);
             }
-            else if(ev & EPOLLOUT && c->on_write)
+            
+            if(!c->closing() && (ev & EPOLLOUT) && c->on_write)
             {
                 c->on_write(c);
             }
@@ -68,6 +71,7 @@ void Reactor::mod_event(int fd,Connection *conn,uint32_t events)
 
 void Reactor::add_connection(int fd,std::unique_ptr<Connection>conn,u_int32_t events)
 {
+    conn->set_events(events); // Connection 的记录与注册值保持一致
     add_event(fd,conn.get(),events); //注册
     connections_[fd] = std::move(conn); //所有权进入 map
 }
