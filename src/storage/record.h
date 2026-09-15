@@ -1,0 +1,41 @@
+#ifndef RECORD_H
+#define RECORD_H
+
+#include<string>
+#include<cstdint>
+#include<cstddef>
+
+//命名空间防止和其他库同名冲突
+namespace kv
+{
+    const uint32_t MAX_KEY = 64*1024; //64KB 键最大大小
+    const uint32_t MAX_VALUE = 16*1024*1024; //16MB 值最大大小 与网络层的 MAX_MESSAGE 16 MB 对应
+
+    //类型记录码
+    enum class RecordType : uint8_t
+    {
+        Set = 1, //写入/覆盖
+        Del = 2, //删除墓碑
+    };
+
+    //数据包 作为 decode 的输出容器
+    struct Record
+    {
+        RecordType type; //记录类型 1 = SET (写入/覆盖) 2 = DEL (删除墓碑)
+        std::string key; //键
+        std::string value; //值
+    };
+
+    //CRC32 计算检验
+    uint32_t crc32(const char *data,size_t len);
+
+    //编码 将记录转换为字节流 完整的一条记录包含 4 字节 CRC头 校验由 put() 负责
+    std::string encode_record(RecordType type,const std::string &key,const std::string &value);
+
+    //解码 将字节流转换为记录 buf 为起始位置 len 即 buf 里可用字节数 out 即解析成功时写入 comsumed 即写入成功时总共占用了多少字节
+    bool decode_record(const char *buf,size_t len,Record &out,size_t &consumed);
+
+}
+
+
+#endif
