@@ -5,7 +5,8 @@
 #include<unordered_map>
 #include<cstddef>
 #include<ostream>
-#include "storage/record.h" //Record / RecordType / 编解码（Storage 的实现要用）
+#include "storage/record.h" 
+#include<sys/types.h>
 
 //命名空间防止和其他库同名冲突
 namespace kv
@@ -42,7 +43,7 @@ namespace kv
         //测试用函数 打印索引内容
         void dump_index(std::ostream &os) const;
 
-        bool get(const std::string &key,std::string &value); //根据 key 查询 valule
+        bool get(const std::string &key,std::string &value); //根据 key 查询 value
         bool del(const std::string &key); //删除指定 key 并追加墓碑标记
 
 
@@ -50,13 +51,13 @@ namespace kv
         int fd_ = -1;
         std::unordered_map<std::string,IndexEntry> index_;
         void recover(); //数据库启动时显式调用的初始化函数，从磁盘重建内存索引
-        bool append_record(const std::string &bytes); //追加写入
+        off_t append_record(const std::string &bytes); //追加写入 返回起始偏移 失败返回 -1
 
         bool sync_on_put_ = true; //每条 put 是否立刻写入到磁盘
 
     };
 
-}
+}//namespace kv
 
 
 #endif

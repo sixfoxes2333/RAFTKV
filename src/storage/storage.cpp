@@ -5,6 +5,7 @@
 #include<unistd.h>
 #include<cerrno>
 #include<iostream>
+#include<vector>
 
 static const char MAGIC[4] = {'K','V','D','B'}; //magic
 static const uint32_t FORMAT_VERSION = 1; //版本号
@@ -184,20 +185,9 @@ namespace kv
         std::string rec = encode_record(RecordType::Set,key,value);
 
         //记录落在文件末尾，先取当前位置作为偏移 (追加)
-        off_t offset = lseek(fd_,0,SEEK_END);
+        off_t offset = append_record(rec);
+
         if(offset < 0)
-        {
-            return false;
-        }
-
-        //追加写
-        if(!write_all(fd_,rec.data(),rec.size()))
-        {
-            return false;
-        }
-
-        //按照策略
-        if(sync_on_put_ && fsync(fd_) != 0)
         {
             return false;
         }
@@ -220,10 +210,75 @@ namespace kv
 
 
 
+    off_t Storage::append_record(const std::string &rec)
+    {
+        //取得当前位置的偏移
+        off_t offset = lseek(fd_,0,SEEK_END);
+
+        if(offset < 0)
+        {
+            return -1;
+        }
+
+        if(!write_all(fd_,rec.data(),rec.size()))
+        {
+            //如果写坏 将文件截回去
+            if(ftruncate(fd_,offset) != 0)
+            {
+                std::cerr << "ftruncate rollback failed : " << strerror(errno) << std::endl;
+            }
+
+            return -1;
+        }
+
+        //策略落盘
+        if(sync_on_put_ && fsync(fd_) != 0)
+        {
+            std::cerr << "fsync failed : " <<strerror(errno) << std::endl;
+            return -1;
+        }
+
+        return offset;
+
+    }
 
 
+    bool Storage::get(const std::string &key,std::string &value)
+    {
+        auto it = index_.find(key);
 
+        if(it == index_.end())
+        {
+            return false; //没找到
+        }
 
+        const IndexEntry &ent = it->second;
+
+        //将记录读出来
+        std::vector<char>buf(ent.total_len);
+        if(!read_exact(fd_,buf.data(),buf.size(),static_cast<off_t>(ent.offset)))
+        {
+            return false;
+        }
+
+        Record rec;
+        size_t consumed = 0;
+
+        if(!decode_record(buf.data(),buf.size(),rec,consumed))
+        {
+            return false;
+        }
+
+        //墓碑记录不应该出现在索引中
+        if(rec.key != key || rec.type != RecordType::Set)
+        {
+            return false;
+        }
+
+        value = rec.value;
+        return true;
+
+    }
 
 
 
