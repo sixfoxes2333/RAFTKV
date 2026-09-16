@@ -10,13 +10,25 @@ Reactor::~Reactor()
     close(epfd_);
 }
 
-void Reactor::loop()
+bool Reactor::loop()
 {
     struct epoll_event events[1024];
     while(true)
     {
         //epoll_wait 返回准备好进行 I/O 操作 fd 的数量
         int n = epoll_wait(epfd_,events,1024,-1);
+
+        if(n < 0)
+        {
+            if(errno == EINTR)
+            {
+                continue;
+            }
+
+            std::cerr<< "epoll_wait failed : " << strerror(errno) << std::endl;
+            return false;
+
+        }
     
         for(int i = 0 ; i < n ; i++)
         {
@@ -49,30 +61,50 @@ void Reactor::loop()
 
     }
 
+    return true;
+
 
 }
 
-void Reactor::add_event(int fd,Connection *conn,uint32_t events)
+bool Reactor::add_event(int fd,Connection *conn,uint32_t events)
 {
     struct epoll_event ev;
     ev.events = events;
     ev.data.ptr = conn;
-    epoll_ctl(epfd_,EPOLL_CTL_ADD,fd,&ev);
+
+    if(epoll_ctl(epfd_,EPOLL_CTL_ADD,fd,&ev) < 0)
+    {
+        std::cerr << "epoll_ctl ADD fd = " << fd << " failed : " << strerror(errno) << std::endl;
+        return false;
+    }
+
+    return true;
 }
 
-void Reactor::mod_event(int fd,Connection *conn,uint32_t events)
+bool Reactor::mod_event(int fd,Connection *conn,uint32_t events)
 {
     struct epoll_event ev;
     ev.events = events;
     ev.data.ptr = conn;
-    epoll_ctl(epfd_,EPOLL_CTL_MOD,fd,&ev);
+
+    if(epoll_ctl(epfd_,EPOLL_CTL_MOD,fd,&ev) < 0)
+    {
+        std::cerr << "epoll_ctl MOD fd = " << fd << " failed : " << strerror(errno) << std::endl;
+        return false;
+    }
+
+    return true;
 }
 
 
 void Reactor::add_connection(int fd,std::unique_ptr<Connection>conn,u_int32_t events)
 {
     conn->set_events(events); // Connection 的记录与注册值保持一致
-    add_event(fd,conn.get(),events); //注册
+    if(!add_event(fd,conn.get(),events)) //注册
+    {
+        return;
+    }
+
     connections_[fd] = std::move(conn); //所有权进入 map
 }
 

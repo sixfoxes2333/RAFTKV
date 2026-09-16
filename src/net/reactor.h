@@ -6,6 +6,8 @@
 #include<memory>
 #include<unordered_map>
 #include<vector>
+#include<cerrno>
+#include<iostream>
 
 //前置声明
 class Reactor;
@@ -15,9 +17,19 @@ class Reactor
 public:
     Reactor();
     ~Reactor(); //close(epfd_)
-    void loop(); 
-    void add_event(int fd,Connection *conn,u_int32_t events); //ADD + data.ptr 注册新 fd
-    void mod_event(int fd,Connection *conn,u_int32_t events); //MOD + data.ptr 修改已注册 fd 在 epoll 里关注的事件
+
+    Reactor(const Reactor&) = delete;
+    Reactor& operator = (const Reactor&) = delete;
+
+    Reactor(Reactor&&) = delete;
+    Reactor& operator = (Reactor&&) = delete;
+
+
+
+
+    bool loop(); 
+    [[nodiscard]]bool add_event(int fd,Connection *conn,u_int32_t events); //ADD + data.ptr 注册新 fd
+    [[nodiscard]]bool mod_event(int fd,Connection *conn,u_int32_t events); //MOD + data.ptr 修改已注册 fd 在 epoll 里关注的事件
 
     //接管连接所有权 + 注册事件
     void add_connection(int fd,std::unique_ptr<Connection> conn,uint32_t events);

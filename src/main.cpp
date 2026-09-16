@@ -8,13 +8,25 @@
 #include<arpa/inet.h>
 #include<memory>
 
+int g_idle_fd = -1;//预留占位 fd
+
 const int MAX_MESSAGE = 16 * 1024 *1024; //防止恶意长度炸内存
 
 //设置非阻塞模式
-void setnonblocking(int fd)
+bool setnonblocking(int fd)
 {
     int old = fcntl(fd,F_GETFL);
-    fcntl(fd,F_SETFL,old | O_NONBLOCK);
+
+    if(old < 0)
+    {
+        return false;
+    }
+    if(fcntl(fd,F_SETFL,old | O_NONBLOCK))
+    {
+        return false;
+    }
+
+    return true;
 }
 
 //短写续写
@@ -116,46 +128,63 @@ void process_frames(Connection *c)
 //读侧回调
 void handle_read(Connection* c)
 {
-    char buf[2048];
-    //read 返回实际读取字节数
-    int len = read(c->fd(),buf,sizeof(buf));
-    if(len > 0)
-    {
-        c->in_.append(buf,len);
+    char buf[64*1024]; //一次读 64 KB
 
-        //检测切分
-        process_frames(c);
-        return;
-    }
-    else if(len == 0)
-    {
-        std::cout << "\n peer closed fd = " << c->fd() << " \n" <<std::endl; //对端半关闭，不再有新数据
-        
-        c->mark_peer_closed();
-
-        //没有待发数据
-        if(c->out_.readable() == 0)
+    //把内核接收缓冲读空 (读到 EAGAIN 为止)
+    while(true)
+   { 
+        //read 返回实际读取字节数
+        ssize_t len = read(c->fd(),buf,sizeof(buf));
+        if(len > 0)
         {
-            c->reactor()->request_close(c);
+            c->in_.append(buf,len);
+
+            //检测切分
+            process_frames(c);
+            
+            if(c->closing())
+            {
+                return;
+            }
+
+            continue;
+        }
+        else if(len == 0)
+        {
+            std::cout << "\n peer closed fd = " << c->fd() << " \n" <<std::endl; //对端半关闭，不再有新数据
+            
+            c->mark_peer_closed();
+
+            //没有待发数据
+            if(c->out_.readable() == 0)
+            {
+                c->reactor()->request_close(c);
+            }
+            else
+            {
+                //还有回复未发送
+                //关掉读，再等 EPOLLOUT 把数据发完
+                c->close_read();
+                c->enable_write();
+            }
+
+            return;
+            
         }
         else
         {
-            //还有回复未发送
-            //关掉读，再等 EPOLLOUT 把数据发完
-            c->close_read();
-            c->enable_write();
-        }
-
-        return;
-        
-    }
-    else
-    {
-        if(errno == EAGAIN || errno == EWOULDBLOCK)
-        {
+            if(errno == EINTR)
+            {
+                continue;
+            }
+            if(errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                return;
+            }
+            c->reactor()->request_close(c);
             return;
         }
-        c->reactor()->request_close(c);
+
     }
 }
 
@@ -163,30 +192,68 @@ void handle_read(Connection* c)
 void handle_accept(Connection *lc)
 {
     struct sockaddr_in client;
-    socklen_t len = sizeof(client);
-    int connfd = accept(lc->fd(),(struct sockaddr*)&client,&len);
-    if(connfd < 0)
+
+    while(true)
     {
-        return;
+        socklen_t len = sizeof(client);
+
+        int connfd = accept4(lc->fd(),(struct sockaddr*)&client,&len,SOCK_NONBLOCK | SOCK_CLOEXEC);
+
+        if(connfd < 0)
+        {
+            if(errno == EINTR)
+            {
+                continue;
+            }
+
+            if(errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                break;
+            }
+
+            if(errno == EMFILE || errno == ENFILE)
+            {
+                //fd 用完了，不管的话就会一直空转
+                //用预留的 fd 腾一个位置
+                //取出队首连接并关闭，再重新占位
+                std::cerr << "\n accept : out of file descriptors \n" << std::endl;
+
+                close(g_idle_fd);
+                int temp = accept4(lc->fd(),nullptr,nullptr,0);
+
+                if(temp >= 0)
+                {
+                    close(temp);
+                }
+
+                g_idle_fd = open("/dev/null",O_RDONLY | O_CLOEXEC);
+
+                break;
+            }
+
+            std::cerr << "\n accept failed : " << strerror(errno) << " \n" << std::endl;
+            break;
+
+        }
+
+        // //测试注入 : 缩小发送缓冲，强制触发短写
+
+        // int sndbuf = 4096;
+        // setsockopt(connfd,SOL_SOCKET,SO_SNDBUF,&sndbuf,sizeof(sndbuf));
+
+        // //测试完注释掉
+
+        auto c = std::make_unique<Connection>(connfd,lc->reactor());
+
+        c->on_read = handle_read;
+        c->on_write = handle_write;
+
+        lc->reactor()->add_connection(connfd,std::move(c),CONN_BASE_EVENTS);
+        
+        std::cout << "\n new conn fd = " << connfd << " from " << inet_ntoa(client.sin_addr) << ":" << ntohs(client.sin_port) << " \n" << std::endl;
     }
 
-    setnonblocking(connfd);
-
-    // //测试注入 : 缩小发送缓冲，强制触发短写
-
-    // int sndbuf = 4096;
-    // setsockopt(connfd,SOL_SOCKET,SO_SNDBUF,&sndbuf,sizeof(sndbuf));
-
-    // //测试完注释掉
-
-    auto c = std::make_unique<Connection>(connfd,lc->reactor());
-
-    c->on_read = handle_read;
-    c->on_write = handle_write;
-
-    lc->reactor()->add_connection(connfd,std::move(c),CONN_BASE_EVENTS);
     
-    std::cout << "\n new conn fd = " << connfd << " \n" << std::endl;
 }
 
 
@@ -195,11 +262,25 @@ int main()
     
     //监听  IPV4 协议 TCP 拿取到文件描述符
     int listenfd = socket(AF_INET,SOCK_STREAM,0);
-    setnonblocking(listenfd);
+    if(listenfd < 0)
+    {
+        std::cerr << "socket failed : " << strerror(errno) << std::endl;
+        return 1;
+    }
+
+    if(!setnonblocking(listenfd))
+    {
+        std::cerr << "setnonblocking failed : " << strerror(errno) << std::endl;
+        return 1;
+    }
 
     //具体设置 socket 选项 开启地址复用
     int opt = 1;
-    setsockopt(listenfd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
+    if(setsockopt(listenfd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt)) < 0)
+    {
+        std::cerr << "setsockopt SO_REUSEADDR failed : " << strerror(errno) << std::endl;
+        return 1;
+    }
 
     //指定内存空间前 n 个字节清零
     struct sockaddr_in addr;
@@ -210,8 +291,27 @@ int main()
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(9006);
 
-    bind(listenfd,(struct sockaddr*)&addr,sizeof(addr));
-    listen(listenfd,5);
+    if(bind(listenfd,(struct sockaddr*)&addr,sizeof(addr)) < 0)
+    {
+        std::cerr << "bind failed : " << strerror(errno) << std::endl;
+        return 1;
+    }
+
+
+    if(listen(listenfd,SOMAXCONN) < 0)
+    {
+        std::cerr << "listen failed : " << strerror(errno) << std::endl;
+        return 1;
+    }
+
+    g_idle_fd = open("/dev/null",O_RDONLY | O_CLOEXEC);//预留占位
+
+    if(g_idle_fd < 0)
+    {
+        std::cerr << "open /dev/null failed : " << strerror(errno) << std::endl;
+        return 1;
+    }
+
 
     Reactor reactor;
 
@@ -222,7 +322,5 @@ int main()
     
     reactor.add_connection(listenfd,std::move(lc),CONN_BASE_EVENTS);
 
-    reactor.loop();
-
-    return 0;
+    return reactor.loop()? 0 : 1;
 }

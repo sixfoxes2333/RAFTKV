@@ -29,6 +29,12 @@ public:
     Connection(int fd,Reactor *r):fd_(fd),reactor_(r){}
     ~Connection(); //close(fd_) 唯一的关闭出口
 
+    Connection(const Connection&) = delete;
+    Connection& operator = (const Connection&) = delete;
+
+    Connection(Connection&&) = delete;
+    Connection& operator = (Connection&&) = delete;
+
     //标记申请关闭
     void mark_closing()
     {

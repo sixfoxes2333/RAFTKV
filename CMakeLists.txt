@@ -28,6 +28,10 @@ add_executable(test_storage
 tests/test_storage.cpp
 ${STORAGE_SRC})
 
+add_executable(test_noncopyable
+tests/test_noncopyable.cpp
+${NET_SRC})
 target_include_directories(kvserver PRIVATE src)
 target_include_directories(kvclient PRIVATE src)
 target_include_directories(test_storage PRIVATE src)
+target_include_directories(test_noncopyable PRIVATE src)
