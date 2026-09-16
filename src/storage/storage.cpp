@@ -278,12 +278,40 @@ namespace kv
         value = rec.value;
         return true;
 
+
     }
 
 
+    bool Storage::del(const std::string &key)
+    {
+        //非法 key
+        if(key.empty() || key.size() > MAX_KEY)
+        {
+            return false;
+        }
 
+        //不存在 key 不追加无意义墓碑
+        auto it = index_.find(key);
+        if(it == index_.end())
+        {
+            return false;
+        }
 
+        //DEL 记录没有 value
+        std::string rec = encode_record(RecordType::Del,key,"");
 
+        off_t offset = append_record(rec);
+
+        if(offset < 0)
+        {
+            return false;
+        }
+
+        index_.erase(it);
+
+        return true;
+
+    }
 
 
 

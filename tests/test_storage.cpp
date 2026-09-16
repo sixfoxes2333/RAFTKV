@@ -252,6 +252,71 @@ int main()
 
 
 
+    std::cout << "[9] del" << std::endl;
+    const char *PATH_DEL = "/tmp/kv_test_del.log";
+    std::remove(PATH_DEL);
+    {
+        kv::Storage s(PATH_DEL);
+        CHECK(s.good());
+
+        //9.1 准备两个 key
+        CHECK(s.put("a", "1"));
+        CHECK(s.put("b", "2"));
+        CHECK(s.key_count() == 2);
+
+        //9.2 删除存在的 key：先耐久追加墓碑 再从 keydir(index_) 删除
+        CHECK(s.del("a"));
+        CHECK(s.key_count() == 1);
+
+        //删除后 get 必须未命中 且不污染 value；其他 key 不受影响
+        std::string out = "sentinel";
+        CHECK(!s.get("a", out));
+        CHECK(out == "sentinel");
+        CHECK(s.get("b", out));
+        CHECK(out == "2");
+
+        //文件：8B 头 + SET(a,1) 15B + SET(b,2) 15B + DEL(a) 14B = 52B
+        std::ifstream fs(PATH_DEL,std::ios::binary | std::ios::ate);
+        CHECK(fs.tellg() == 52);
+        fs.close();
+
+        //9.3 最后一条必须真的是 DEL 墓碑，而不是只删了内存索引
+        {
+            std::ifstream f(PATH_DEL,std::ios::binary);
+            f.seekg(52 - 14);
+            std::string tail(14,'\0');
+            f.read(&tail[0],tail.size());
+
+            kv::Record rec;
+            size_t consumed = 0;
+            CHECK(kv::decode_record(tail.data(),tail.size(),rec,consumed));
+            CHECK(rec.type == kv::RecordType::Del);
+            CHECK(rec.key == "a");
+            CHECK(rec.value.empty());
+            CHECK(consumed == 14);
+        }
+
+        //9.4 删除不存在的 key：返回 false 且不能再追加一条无意义墓碑
+        CHECK(!s.del("a"));
+        CHECK(!s.del("nope"));
+        std::ifstream unchanged(PATH_DEL,std::ios::binary | std::ios::ate);
+        CHECK(unchanged.tellg() == 52);
+        unchanged.close();
+
+        //9.5 空 key 非法，文件同样不能增长
+        CHECK(!s.del(""));
+        std::ifstream still_unchanged(PATH_DEL,std::ios::binary | std::ios::ate);
+        CHECK(still_unchanged.tellg() == 52);
+        still_unchanged.close();
+
+        //9.6 删除后重新 put：新 SET 记录复活 key，并指向最新值
+        CHECK(s.put("a", "9"));
+        CHECK(s.key_count() == 2);
+        CHECK(s.get("a", out));
+        CHECK(out == "9");
+    }
+
+
     //汇总
     if (g_failed == 0) 
     {

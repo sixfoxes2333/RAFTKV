@@ -12,7 +12,7 @@
 namespace kv
 {
 
-    //索引条目
+    //索引条目 bitcask keydir
     struct IndexEntry
     {
         uint64_t offset; //记录起始偏移量
