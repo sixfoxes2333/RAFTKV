@@ -8,6 +8,7 @@
 #include "storage/record.h" 
 #include<sys/types.h>
 
+
 //命名空间防止和其他库同名冲突
 namespace kv
 {
@@ -26,6 +27,13 @@ namespace kv
 
         explicit Storage(const std::string &path); //禁用隐式转换，打开/新建文件，顺便写上 recover() 以重建 index_
         ~Storage();
+
+
+        Storage(const Storage&) = delete;
+        Storage& operator=(const Storage&) = delete;
+        Storage(Storage&&) = delete;
+        Storage& operator=(Storage&&) = delete;
+
 
         bool good() const
         {
@@ -50,7 +58,7 @@ namespace kv
     private:
         int fd_ = -1;
         std::unordered_map<std::string,IndexEntry> index_;
-        void recover(); //数据库启动时显式调用的初始化函数，从磁盘重建内存索引
+        bool recover(); //数据库启动时显式调用的初始化函数，从磁盘重建内存索引
         off_t append_record(const std::string &bytes); //追加写入 返回起始偏移 失败返回 -1
 
         bool sync_on_put_ = true; //每条 put 是否立刻写入到磁盘

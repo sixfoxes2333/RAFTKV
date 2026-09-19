@@ -9,8 +9,6 @@
 #include<cerrno>
 #include<iostream>
 
-//前置声明
-class Reactor;
 
 class Reactor
 {

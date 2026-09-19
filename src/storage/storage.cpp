@@ -12,6 +12,7 @@ static const uint32_t FORMAT_VERSION = 1; //版本号
 static const size_t FILE_HEADER_SIZE = sizeof(MAGIC) + sizeof(FORMAT_VERSION); //文件头 magic + 版本号 = 8 字节
 
 
+
 //将 buf 的 len 字节全部写出 PoSIX 原生 write 存在短写与信号打断问题
 static bool write_all(int fd,const char* buf,size_t len)
 {
@@ -28,6 +29,11 @@ static bool write_all(int fd,const char* buf,size_t len)
             }
 
             //否则为真错误
+            return false;
+        }
+
+        if(n == 0)
+        {
             return false;
         }
 
@@ -80,6 +86,93 @@ static bool read_exact(int fd,char* buf,size_t len,off_t offset)
 namespace kv
 {
 
+    enum class ScanStatus
+    {
+        Ok,
+        Incomplete, //只发生在文件尾 安全截断
+        Corrupt, //完整记录损坏 拒绝启动
+        IoError //pread 等系统调用失败
+    };
+
+
+    //读取 offset 处一条记录
+    static ScanStatus scan_record_at(int fd,off_t file_size,off_t offset,Record &out,size_t &consumed)
+    {
+        consumed = 0;
+
+        if(offset < 0 || offset > file_size)
+        {
+            return ScanStatus::Corrupt;
+        }
+
+        off_t remaining = file_size - offset;
+
+        //不足固定头部长度
+        if(remaining < static_cast<off_t>(RECORD_HEADER_SIZE))
+        {
+            return ScanStatus::Incomplete;
+        }
+
+        char hdr[RECORD_HEADER_SIZE];
+
+        if(!::read_exact(fd,hdr,sizeof(hdr),offset))
+        {
+            //pread 失败则 IO 错 不是普通的残损尾部
+            return ScanStatus::IoError;
+        }
+
+        uint8_t type = static_cast<uint8_t>(hdr[4]);
+        uint32_t klen = read_be32(hdr+5);
+        uint32_t vlen = read_be32(hdr+9);
+
+        //完整头里的元数据非法
+        if(type != static_cast<uint8_t>(RecordType::Set) && type != static_cast<uint8_t>(RecordType::Del))
+        {
+            return ScanStatus::Corrupt;
+        }
+
+        if(klen == 0 || klen > MAX_KEY || vlen > MAX_VALUE)
+        {
+            return ScanStatus::Corrupt;
+        }
+
+        //墓碑无 value
+        if(type == static_cast<uint8_t>(RecordType::Del) && vlen != 0)
+        {
+            return ScanStatus::Corrupt;
+        }
+
+        size_t total = RECORD_HEADER_SIZE + static_cast<size_t>(klen) + static_cast<size_t>(vlen);
+
+        if(remaining < static_cast<off_t>(total))
+        {
+            return ScanStatus::Incomplete;
+        }
+
+        std::vector<char>bytes(total);
+
+        if(! :: read_exact(fd,bytes.data(),bytes.size(),offset))
+        {
+            return ScanStatus::IoError;
+        }
+
+        if(!decode_record(bytes.data(),bytes.size(),out,consumed))
+        {
+            return ScanStatus::Corrupt;
+        }
+
+        if(consumed != total || out.key.empty())
+        {
+            return ScanStatus::Corrupt;
+        }
+
+        return ScanStatus::Ok;
+
+    }
+
+
+
+    
     Storage::Storage(const std::string &path)
     {
         fd_ = open(path.c_str(),O_RDWR | O_CREAT,0644);
@@ -155,6 +248,14 @@ namespace kv
                 return;
             }
 
+            //文件头校验完成后
+
+            if(!recover())
+            {
+                close(fd_);
+                fd_ = -1;
+                return;
+            }
 
 
         }
@@ -308,6 +409,94 @@ namespace kv
         }
 
         index_.erase(it);
+
+        return true;
+
+    }
+
+
+    bool Storage::recover()
+    {
+        if(fd_ < 0)
+        {
+            return false;
+        }
+
+        off_t file_size = lseek(fd_,0,SEEK_END);
+
+        if(file_size < static_cast<off_t>(FILE_HEADER_SIZE))
+        {
+            std::cerr<< "recover: file too small" << std::endl;
+            return false;
+        }
+
+        //建立临时表 完整恢复再替换 index_(keydir)
+        std::unordered_map<std::string,IndexEntry>rebuilt;
+
+        off_t offset = static_cast<off_t>(FILE_HEADER_SIZE);
+
+        while(offset < file_size)
+        {
+            Record rec;
+            size_t consumed = 0;
+
+            ScanStatus status = scan_record_at(fd_,file_size,offset,rec,consumed);
+
+            if(status == ScanStatus::Incomplete)
+            {
+                std::cerr << "recover : truncate incomplete tail at offset = " << offset << std::endl;
+
+                //截掉 残损尾部
+                if(ftruncate(fd_,offset) != 0)
+                {
+                    std::cerr << "recover : ftruncate failed : " << strerror(errno) << std::endl;
+
+                    return false;
+                }
+                
+
+                if(fsync(fd_) != 0)
+                {
+                    std::cerr << "recover : fsync after truncate failed : " << strerror(errno) << std::endl;
+
+                    return false;
+                }
+
+                break;
+
+            }
+
+            if(status == ScanStatus::Corrupt)
+            {
+                std::cerr << "recover : corrupt record at offset = " << offset << std::endl;
+
+                return false;
+            }
+
+            if(status == ScanStatus::IoError)
+            {
+                std::cerr << "recover : IO error at offset = " << std::endl;
+
+                return false;
+            }
+
+            //如果 status == ScanStatus:: OK
+            //按照文件先后顺序重放
+            if(rec.type == RecordType::Set)
+            {
+                rebuilt[rec.key] = IndexEntry{static_cast<uint64_t>(offset),
+                static_cast<uint32_t>(consumed)};
+            }
+            else //墓碑标识
+            {
+                rebuilt.erase(rec.key);
+            }
+
+            offset += static_cast<off_t>(consumed);
+
+        }
+
+        index_.swap(rebuilt);
 
         return true;
 

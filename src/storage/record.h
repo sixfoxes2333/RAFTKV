@@ -5,6 +5,16 @@
 #include<cstdint>
 #include<cstddef>
 
+
+inline constexpr size_t RECORD_CRC_SIZE = 4;
+inline constexpr size_t RECORD_TYPE_SIZE = 1;
+inline constexpr size_t RECORD_LEN_SIZE = 4;
+inline constexpr size_t RECORD_HEADER_SIZE = RECORD_CRC_SIZE + RECORD_TYPE_SIZE + 2 * RECORD_LEN_SIZE;
+
+static_assert(RECORD_HEADER_SIZE == 13,"记录头长度变了必须同时改 FORMAT_VERSION 和测试里的黄金值");
+
+
+
 //命名空间防止和其他库同名冲突
 namespace kv
 {

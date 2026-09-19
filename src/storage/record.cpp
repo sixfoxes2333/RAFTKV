@@ -58,7 +58,7 @@ namespace kv
     {
         //最小记录头 : CRC(4) + type(1) + key_len(4) + val_len(4) = 13
 
-        if(len < 13)
+        if(len < RECORD_HEADER_SIZE)
         {
             return false;
         }
@@ -82,7 +82,7 @@ namespace kv
         }
 
         //检查内容是否到齐
-        size_t total = 13 + static_cast<size_t>(klen) + vlen;
+        size_t total = RECORD_HEADER_SIZE + static_cast<size_t>(klen) + vlen;
         if(len < total)
         {
             return false;
@@ -98,8 +98,8 @@ namespace kv
 
         //全部校验都通过则填写输出参数
         out.type = static_cast<RecordType>(type);
-        out.key.assign(buf+13,klen); //清空并重新赋值
-        out.value.assign(buf+13+klen,vlen); //清空并重新赋值
+        out.key.assign(buf+RECORD_HEADER_SIZE,klen); //清空并重新赋值
+        out.value.assign(buf+RECORD_HEADER_SIZE+klen,vlen); //清空并重新赋值
 
         consumed = total; //告诉调用方该记录占用多少字节
 
