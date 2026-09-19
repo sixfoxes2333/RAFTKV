@@ -4,6 +4,7 @@
 # 【用法】
 #   tests/run_all.sh           跑：存储单测 + 恢复测试 + 6 项网络/类型契约
 #   tests/run_all.sh --asan    额外跑 ASan/UBSan 构建（较慢）
+#   tests/run_all.sh --slow    额外跑崩溃注入（kill -9 / 残尾 / 位翻转，约 25s）
 #
 # 【当前预期（2026-09-16，M2e 完成）】
 #   test_storage              PASS
@@ -100,6 +101,16 @@ if ./build/test_noncopyable; then
     :
 else
     fail=$((fail + 1))
+fi
+
+if [ "${1:-}" = "--slow" ]; then
+    echo
+    echo "== 附加（慢）：崩溃注入（kill -9 / 残尾 / 位翻转）=="
+    if python3 tests/crash_inject_test.py; then
+        :
+    else
+        fail=$((fail + 1))
+    fi
 fi
 
 if [ "${1:-}" = "--asan" ]; then
