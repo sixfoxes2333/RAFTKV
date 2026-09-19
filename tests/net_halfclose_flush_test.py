@@ -51,6 +51,7 @@ PAYLOAD_SIZE = 8 * 1024 * 1024      # 8MB：远大于"内核发送缓冲 + 接�
 IDLE_WINDOW = 2.0                   # 观察服务器是否空转的时长（秒）
 CPU_BUDGET = 0.5                    # 空闲窗口内允许消耗的 CPU 时间上限（秒）
 READ_TIMEOUT = 60.0                 # 读回复的总超时（秒）
+SEND_TIMEOUT = 30.0                 # 发送阶段的超时（sendall 也可能永久阻塞）
 CLK_TCK = os.sysconf("SC_CLK_TCK")  # 每秒的时钟滴答数（通常 100）
 
 
@@ -112,13 +113,23 @@ def cpu_seconds(pid: int):
 
 
 def recv_exact(s: socket.socket, n: int, deadline: float) -> bytes:
-    """精确读 n 字节；超时或提前 EOF 时返回已读到的部分（可能为空）。"""
+    """精确读 n 字节；超时或提前 EOF 时返回已读到的部分（可能为空）。
+
+    注意：必须给 socket 设 timeout，否则阻塞中的 recv 不会被上面的时钟检查打断 ——
+    那会让整个测试脚本只能靠外部 timeout 杀掉（审查指出的问题）。
+    """
     buf = bytearray()
     while len(buf) < n:
-        if time.time() > deadline:
+        remain = deadline - time.time()
+        if remain <= 0:
             print("  !! 读取超时")
             return bytes(buf)
-        chunk = s.recv(min(65536, n - len(buf)))
+        s.settimeout(remain)          #关键：让阻塞的 recv 自己超时
+        try:
+            chunk = s.recv(min(65536, n - len(buf)))
+        except socket.timeout:
+            print("  !! 读取超时")
+            return bytes(buf)
         if not chunk:
             return bytes(buf)
         buf += chunk
@@ -140,7 +151,13 @@ def main() -> int:
         print(f"  客户端 SO_RCVBUF 实际值 = {real_rcvbuf} 字节（内核会把设置值加倍）")
 
         print(f"  发送 {len(payload)} 字节请求，随即 shutdown(SHUT_WR)（半关闭）")
-        s.sendall(frame(payload))
+        s.settimeout(SEND_TIMEOUT)   #发送阶段也要有超时，否则 sendall 可能永久阻塞
+        try:
+            s.sendall(frame(payload))
+        except socket.timeout:
+            print(f"  !! 发送超时（{SEND_TIMEOUT}s）")
+            s.close()
+            return 1
         s.shutdown(socket.SHUT_WR)
 
         # 让服务器读完请求并开始回写 —— 很快会撞上发送缓冲满（EAGAIN）

@@ -53,6 +53,7 @@ SERVER_LOG = "/tmp/kv_backpressure_server.log"
 PAYLOAD_SIZE = 8 * 1024 * 1024     # 8MB：远超 客户端收缓冲 + 服务器发缓冲
 SEND_BLOCK_TIME = 0.8              # 客户端发送后故意不读的时长（秒）
 READ_TIMEOUT = 60.0                # 读取总超时（秒）
+SEND_TIMEOUT = 30.0                # 发送阶段的超时（sendall 也可能永久阻塞）
 
 
 def frame(payload: bytes) -> bytes:
@@ -120,7 +121,14 @@ def main() -> int:
         print(f"  发送单条 {len(payload)} 字节的消息（协议：4 字节长度头 + 内容）")
 
         t0 = time.time()
-        s.sendall(frame(payload))
+        #发送阶段的超时：没有它时 sendall 可能永久阻塞，整脚本只能靠外部 timeout 杀
+        s.settimeout(SEND_TIMEOUT)
+        try:
+            s.sendall(frame(payload))
+        except socket.timeout:
+            print(f"  !! 发送超时（{SEND_TIMEOUT}s）—— 服务器可能没有在读")
+            s.close()
+            return 1
         print(f"  发送完成，故意 {SEND_BLOCK_TIME}s 不读，制造背压…")
         time.sleep(SEND_BLOCK_TIME)
 
@@ -134,10 +142,16 @@ def main() -> int:
             """精确读 n 字节；提前关闭/超时时返回已读到的部分（可能为空）"""
             buf = bytearray()
             while len(buf) < n:
-                if time.time() - t0 > READ_TIMEOUT:
+                remain = READ_TIMEOUT - (time.time() - t0)
+                if remain <= 0:
                     print("  !! 读取超时")
                     return bytes(buf)
-                chunk = s.recv(n - len(buf))
+                s.settimeout(remain)      #关键：让阻塞的 recv 自己超时，而不是只在循环开头查时钟
+                try:
+                    chunk = s.recv(n - len(buf))
+                except socket.timeout:
+                    print("  !! 读取超时")
+                    return bytes(buf)
                 if not chunk:
                     return bytes(buf)              # 对端提前关闭
                 buf += chunk
@@ -155,10 +169,16 @@ def main() -> int:
             # 防御：长度头离谱时不去读它
             target = reply_len if 0 < reply_len <= 64 * 1024 * 1024 else len(payload)
             while len(got) < target:
-                if time.time() - t0 > READ_TIMEOUT:
+                remain = READ_TIMEOUT - (time.time() - t0)
+                if remain <= 0:
                     print("  !! 读取超时")
                     break
-                chunk = s.recv(4096)
+                s.settimeout(remain)          #同上：让阻塞的 recv 有超时
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    print("  !! 读取超时")
+                    break
                 if not chunk:
                     early_eof = True           # 对端提前关闭：当前 bug 的症状
                     break

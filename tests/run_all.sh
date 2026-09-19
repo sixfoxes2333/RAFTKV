@@ -5,23 +5,23 @@
 #   tests/run_all.sh           跑：存储单测 + 恢复测试 + 6 项网络/类型契约
 #   tests/run_all.sh --asan    额外跑 ASan/UBSan 构建（较慢）
 #
-# 【当前预期（2026-09-16，M2d 完成、M2e 未做）】
+# 【当前预期（2026-09-16，M2e 完成）】
 #   test_storage              PASS
-#   test_recovery             FAIL  ← 待修：重开后 keydir 为空 / 残损尾未截断 / CRC 损坏未拒绝
+#   test_recovery             PASS（keydir 重建 / torn-tail 截断 / 头校验和拒绝损坏 / 拒绝 v1 文件）
 #   net_halfclose_test        PASS
 #   net_halfclose_flush_test  PASS
 #   net_backpressure_test     PASS
 #   net_emfile_test           PASS
 #   net_startup_fail_test     PASS
 #   test_noncopyable          PASS
-#   整体退出码非 0
+#   整体退出码 0
 #
 # 【历史】
 #   网络层 Step 0-9 已封版并标记 net-v1
 #   存储 M1/M2a/M2b：记录格式、文件头、put
 #   存储 M2c：append_record + get + CRC 拒绝脏数据
 #   存储 M2d：DEL 墓碑 + keydir 删除
-#   存储 M2e：待做 recover + torn-tail 截断（本表 test_recovery 转绿）
+#   存储 M2e：recover + torn-tail 截断 + 记录格式 v2（头校验和，区分损坏与残尾）
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
