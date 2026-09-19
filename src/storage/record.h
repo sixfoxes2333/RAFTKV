@@ -5,19 +5,27 @@
 #include<cstdint>
 #include<cstddef>
 
-
+inline constexpr size_t RECORD_HEADER_CRC_SIZE = 4;
 inline constexpr size_t RECORD_CRC_SIZE = 4;
 inline constexpr size_t RECORD_TYPE_SIZE = 1;
 inline constexpr size_t RECORD_LEN_SIZE = 4;
-inline constexpr size_t RECORD_HEADER_SIZE = RECORD_CRC_SIZE + RECORD_TYPE_SIZE + 2 * RECORD_LEN_SIZE;
 
-static_assert(RECORD_HEADER_SIZE == 13,"记录头长度变了必须同时改 FORMAT_VERSION 和测试里的黄金值");
-
+inline constexpr size_t RECORD_PAYLOAD_PREFIX_SIZE = RECORD_TYPE_SIZE + 2 * RECORD_LEN_SIZE;
 
 
 //命名空间防止和其他库同名冲突
 namespace kv
 {
+
+    inline constexpr size_t RECORD_HEADER_SIZE = RECORD_CRC_SIZE + RECORD_TYPE_SIZE + 2 * RECORD_LEN_SIZE + RECORD_CRC_SIZE;
+
+    inline constexpr size_t RECORD_PAYLOAD_CRC_OFF = RECORD_HEADER_CRC_SIZE;                   //4
+    inline constexpr size_t RECORD_TYPE_OFF        = RECORD_PAYLOAD_CRC_OFF + RECORD_CRC_SIZE; //8
+    inline constexpr size_t RECORD_KEY_LEN_OFF     = RECORD_TYPE_OFF + RECORD_TYPE_SIZE;       //9
+    inline constexpr size_t RECORD_VAL_LEN_OFF     = RECORD_KEY_LEN_OFF + RECORD_LEN_SIZE;     //13
+
+    static_assert(RECORD_HEADER_SIZE == 17,"记录头长度变了必须同时改 FORMAT_VERSION 和测试里的黄金值");
+
     const uint32_t MAX_KEY = 64*1024; //64KB 键最大大小
     const uint32_t MAX_VALUE = 16*1024*1024; //16MB 值最大大小 与网络层的 MAX_MESSAGE 16 MB 对应
 

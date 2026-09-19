@@ -36,19 +36,27 @@ namespace kv
 
     std::string encode_record(RecordType type,const std::string &key,const std::string &value)
     {
-        std::string body;
-        body.push_back(static_cast<char>(type)); //type 1 字节
-        append_be32(body,key.size()); //key_len 大端 4 字节
-        append_be32(body,value.size()); //val_len 大端 4 字节
-        body += key; //key 原始字节
-        body += value; //value 原始字节
+        std::string payload;
+        payload.push_back(static_cast<char>(type)); //type 1 字节
+        append_be32(payload,key.size()); //key_len 大端 4 字节
+        append_be32(payload,value.size()); //val_len 大端 4 字节
+        payload += key; //key 原始字节
+        payload += value; //value 原始字节
 
-        uint32_t c = crc32(body.data(),body.size()); //对 body 算 CRC
+        uint32_t payload_crc = crc32(payload.data(),payload.size()); //对 payload 算 CRC
 
-        //CRC 在前，body 在后
+        //固定头 除了 header_crc 之外还有 payload_crc + payload 的前 9 字节
+        std::string fixed;
+        append_be32(fixed,payload_crc);
+        fixed.append(payload.data(),RECORD_PAYLOAD_PREFIX_SIZE);
+        
+        //头校验和
+        uint32_t head_crc = crc32(fixed.data(),fixed.size());
+
         std::string out;
-        append_be32(out,c);
-        out += body;
+        append_be32(out,head_crc);
+        out += fixed;
+        out.append(payload.data() + RECORD_PAYLOAD_PREFIX_SIZE,payload.size()-RECORD_PAYLOAD_PREFIX_SIZE);
 
         return out;
     }
@@ -63,11 +71,18 @@ namespace kv
             return false;
         }
 
+        //头校验和
+        if(crc32(buf + RECORD_PAYLOAD_CRC_OFF,RECORD_HEADER_SIZE - RECORD_HEADER_CRC_SIZE) != read_be32(buf))
+        {
+            return false;
+        }
+
+
         //解析各个字段
-        uint32_t crc_stored = read_be32(buf); //偏移 0
-        uint8_t type = static_cast<uint8_t>(buf[4]); //偏移 4
-        uint32_t klen = read_be32(buf+5); //偏移 5
-        uint32_t vlen = read_be32(buf+9); //偏移 9
+        uint32_t payload_crc = read_be32(buf + RECORD_PAYLOAD_CRC_OFF); //偏移 0
+        uint8_t type = static_cast<uint8_t>(buf[RECORD_TYPE_OFF]); //偏移 4
+        uint32_t klen = read_be32(buf+RECORD_KEY_LEN_OFF); //偏移 5
+        uint32_t vlen = read_be32(buf+RECORD_VAL_LEN_OFF); //偏移 9
 
         //合法性检查
         if(type != static_cast<uint8_t>(RecordType::Set) && type != static_cast<uint8_t>(RecordType::Del))
@@ -88,10 +103,8 @@ namespace kv
             return false;
         }
 
-        //CRC 校验 type 起 (buf+4)，共 9 + klen + vlen 字节
-        //9 = type(1) + key_len(4) + val_len(4)
-        uint32_t crc_calc = crc32(buf+4,9+klen + vlen);
-        if(crc_calc != crc_stored)
+        // 负载校验和
+        if(crc32(buf + RECORD_TYPE_OFF,RECORD_PAYLOAD_PREFIX_SIZE + static_cast<size_t>(klen) + vlen) != payload_crc)
         {
             return false;
         }

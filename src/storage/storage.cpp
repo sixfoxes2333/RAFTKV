@@ -8,7 +8,7 @@
 #include<vector>
 
 static const char MAGIC[4] = {'K','V','D','B'}; //magic
-static const uint32_t FORMAT_VERSION = 1; //版本号
+static const uint32_t FORMAT_VERSION = 2; //版本号
 static const size_t FILE_HEADER_SIZE = sizeof(MAGIC) + sizeof(FORMAT_VERSION); //文件头 magic + 版本号 = 8 字节
 
 
@@ -121,9 +121,16 @@ namespace kv
             return ScanStatus::IoError;
         }
 
-        uint8_t type = static_cast<uint8_t>(hdr[4]);
-        uint32_t klen = read_be32(hdr+5);
-        uint32_t vlen = read_be32(hdr+9);
+        //验证头校验和
+        if(crc32(hdr+RECORD_PAYLOAD_CRC_OFF,RECORD_HEADER_SIZE-RECORD_HEADER_CRC_SIZE) != read_be32(hdr))
+        {
+            return ScanStatus::Corrupt;
+        }
+
+
+        uint8_t type = static_cast<uint8_t>(hdr[RECORD_TYPE_OFF]);
+        uint32_t klen = read_be32(hdr+RECORD_KEY_LEN_OFF);
+        uint32_t vlen = read_be32(hdr+RECORD_VAL_LEN_OFF);
 
         //完整头里的元数据非法
         if(type != static_cast<uint8_t>(RecordType::Set) && type != static_cast<uint8_t>(RecordType::Del))
@@ -313,11 +320,20 @@ namespace kv
 
     off_t Storage::append_record(const std::string &rec)
     {
+        //已不可信
+        if(poisoned_)
+        {
+            std::cerr << "append_record: storage is poisoned,reopen required" << std::endl;
+            return -1;
+        }
+
         //取得当前位置的偏移
         off_t offset = lseek(fd_,0,SEEK_END);
 
         if(offset < 0)
         {
+            std::cerr << "lseek failed : " << strerror(errno) << std::endl;
+            poisoned_ = true;
             return -1;
         }
 
@@ -327,6 +343,7 @@ namespace kv
             if(ftruncate(fd_,offset) != 0)
             {
                 std::cerr << "ftruncate rollback failed : " << strerror(errno) << std::endl;
+                poisoned_ = true;
             }
 
             return -1;
@@ -336,6 +353,7 @@ namespace kv
         if(sync_on_put_ && fsync(fd_) != 0)
         {
             std::cerr << "fsync failed : " <<strerror(errno) << std::endl;
+            poisoned_ = true;
             return -1;
         }
 

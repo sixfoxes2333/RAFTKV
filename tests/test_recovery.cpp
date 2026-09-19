@@ -77,6 +77,20 @@ static bool flip_byte(const char *path,std::streamoff offset)
     return f.good();
 }
 
+static bool write_bytes(const char *path,std::streamoff offset,const std::string &bytes)
+{
+    std::fstream f(path,std::ios::binary | std::ios::in | std::ios::out);
+    if(!f)
+    {
+        return false;
+    }
+
+    f.seekp(offset);
+    f.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));
+    f.flush();
+    return f.good();
+}
+
 static void check_value(kv::Storage &s,const std::string &key,const std::string &expected)
 {
     std::string out = "sentinel";
@@ -262,6 +276,74 @@ int main()
     }
     CHECK(file_size(PATH_BAD_MIDDLE) == FILE_HDR + REC_A + REC_B + REC_C);
 
+    // -------------------------------------------------------------------------
+    std::cout << "[7] length field corrupted mid-file : must refuse (not truncate)" << std::endl;
+    const char *PATH_BAD_LEN = "/tmp/kv_recover_bad_len.log";
+    std::remove(PATH_BAD_LEN);
+    {
+        kv::Storage s(PATH_BAD_LEN);
+        CHECK(s.good());
+        CHECK(s.put("a","1"));
+        CHECK(s.put("b","2"));
+        CHECK(s.put("c","3"));
+    }
+    const std::streamoff bad_len_size = FILE_HDR + REC_A + REC_B + REC_C;
+    CHECK(file_size(PATH_BAD_LEN) == bad_len_size);
+
+    //把中间 b 记录的 val_len 字段改成 257（v2 里 val_len 位于记录头内偏移 13）
+    //头校验和随即失配 → 必须判 Corrupt；绝对不能因为"长度超出文件剩余"就当成残尾截断
+    {
+        std::string vlen_be;
+        vlen_be.push_back(0x00);
+        vlen_be.push_back(0x00);
+        vlen_be.push_back(0x01);
+        vlen_be.push_back(0x01);   //257
+        CHECK(write_bytes(PATH_BAD_LEN,FILE_HDR + REC_A + 13,vlen_be));
+    }
+    {
+        kv::Storage s(PATH_BAD_LEN);
+        CHECK(!s.good());                              //拒绝启动
+    }
+    CHECK(file_size(PATH_BAD_LEN) == bad_len_size);     //合法记录 c 必须保留
+
+    // -------------------------------------------------------------------------
+    std::cout << "[8] header checksum corrupted : must refuse" << std::endl;
+    const char *PATH_BAD_HCRC = "/tmp/kv_recover_bad_hcrc.log";
+    std::remove(PATH_BAD_HCRC);
+    {
+        kv::Storage s(PATH_BAD_HCRC);
+        CHECK(s.good());
+        CHECK(s.put("a","1"));
+        CHECK(s.put("b","2"));
+    }
+    const std::streamoff bad_hcrc_size = FILE_HDR + REC_A + REC_B;
+    CHECK(flip_byte(PATH_BAD_HCRC,FILE_HDR + 1));        //改坏第 2 条记录 header_crc 的第 2 字节
+    {
+        kv::Storage s(PATH_BAD_HCRC);
+        CHECK(!s.good());
+    }
+    CHECK(file_size(PATH_BAD_HCRC) == bad_hcrc_size);
+
+    // -------------------------------------------------------------------------
+    std::cout << "[9] old format version (v1) : must refuse" << std::endl;
+    const char *PATH_V1 = "/tmp/kv_recover_v1.log";
+    std::remove(PATH_V1);
+    {
+        //手写一个 v1 文件头：magic "KVDB" + version = 1
+        std::string hdr;
+        hdr += "KVDB";
+        hdr.push_back(0x00);
+        hdr.push_back(0x00);
+        hdr.push_back(0x00);
+        hdr.push_back(0x01);
+        CHECK(append_bytes(PATH_V1,hdr));
+    }
+    CHECK(file_size(PATH_V1) == 8);
+    {
+        kv::Storage s(PATH_V1);
+        CHECK(!s.good());   //FORMAT_VERSION 已是 2，旧版本文件必须拒绝
+    }
+    CHECK(file_size(PATH_V1) == 8);   //拒绝时不能改动文件
     // -------------------------------------------------------------------------
     if(g_failed == 0)
     {

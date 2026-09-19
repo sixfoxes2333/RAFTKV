@@ -37,7 +37,7 @@ namespace kv
 
         bool good() const
         {
-            return fd_ >= 0; //打开是否成功
+            return fd_ >= 0 && !poisoned_; //打开是否成功
         }
 
         bool put(const std::string &key,const std::string &value); //encode 并追加写入或更新已存在的 key
@@ -62,6 +62,8 @@ namespace kv
         off_t append_record(const std::string &bytes); //追加写入 返回起始偏移 失败返回 -1
 
         bool sync_on_put_ = true; //每条 put 是否立刻写入到磁盘
+
+        bool poisoned_ = false; //写失败且结果无法确认 不可再用
 
     };
 
