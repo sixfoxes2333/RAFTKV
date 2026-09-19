@@ -221,6 +221,30 @@ static int cmd_flip(const char *path,long long offset)
     return 0;
 }
 
+//故障注入用：连续 put，逐条打印结果 + 最终 good() 与文件大小
+//（配合 tests/fail_inject.c 的 LD_PRELOAD 注入，验证 poisoned 语义）
+static int cmd_poison(const char *path,int count)
+{
+    kv::Storage s(path);
+
+    if(!s.good())
+    {
+        std::cerr << "poison: storage not good" << std::endl;
+        return 2;
+    }
+
+    for(int i = 0; i < count; i++)
+    {
+        bool ok = s.put(key_of(i),val_of(i));
+        std::cout << "PUT " << i << " " << (ok ? 1 : 0) << std::endl;
+    }
+
+    //GOOD 反映对象是否仍可用于写入；SIZE 反映磁盘上实际落了几个字节
+    std::cout << "GOOD " << (s.good() ? 1 : 0) << std::endl;
+    std::cout << "SIZE " << file_size(path) << std::endl;
+    return 0;
+}
+
 int main(int argc,char **argv)
 {
     if(argc < 3)
@@ -257,6 +281,11 @@ int main(int argc,char **argv)
     {
         std::cout << file_size(path) << std::endl;
         return 0;
+    }
+
+    if(cmd == "poison")
+    {
+        return (argc >= 4) ? cmd_poison(path,std::atoi(argv[3])) : 2;
     }
 
     std::cerr << "unknown command: " << cmd << std::endl;

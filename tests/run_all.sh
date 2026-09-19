@@ -105,8 +105,14 @@ fi
 
 if [ "${1:-}" = "--slow" ]; then
     echo
-    echo "== 附加（慢）：崩溃注入（kill -9 / 残尾 / 位翻转）=="
+    echo "== 附加（慢）：崩溃注入 + 写失败故障注入 =="
     if python3 tests/crash_inject_test.py; then
+        :
+    else
+        fail=$((fail + 1))
+    fi
+
+    if python3 tests/fail_inject_test.py; then
         :
     else
         fail=$((fail + 1))
