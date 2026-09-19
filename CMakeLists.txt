@@ -42,10 +42,15 @@ ${STORAGE_SRC})
 add_executable(crash_writer
 tests/crash_writer.cpp
 ${STORAGE_SRC})
+
+add_executable(test_protocol
+tests/test_protocol.cpp
+src/net/protocol.cpp)
 target_include_directories(kvserver PRIVATE src)
 target_include_directories(kvclient PRIVATE src)
 target_include_directories(test_storage PRIVATE src)
 target_include_directories(test_noncopyable PRIVATE src)
 target_include_directories(test_recovery PRIVATE src)
 target_include_directories(crash_writer PRIVATE src)
+target_include_directories(test_protocol PRIVATE src)
 

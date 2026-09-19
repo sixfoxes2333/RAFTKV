@@ -4,6 +4,7 @@
 #include<string>
 #include<cstdint>
 #include<cstddef>
+#include "base/limits.h" //MAX_KEY / MAX_VALUE（网络帧、协议、记录共用）
 
 inline constexpr size_t RECORD_HEADER_CRC_SIZE = 4;
 inline constexpr size_t RECORD_CRC_SIZE = 4;
@@ -26,8 +27,7 @@ namespace kv
 
     static_assert(RECORD_HEADER_SIZE == 17,"记录头长度变了必须同时改 FORMAT_VERSION 和测试里的黄金值");
 
-    const uint32_t MAX_KEY = 64*1024; //64KB 键最大大小
-    const uint32_t MAX_VALUE = 16*1024*1024; //16MB 值最大大小 与网络层的 MAX_MESSAGE 16 MB 对应
+    //MAX_KEY / MAX_VALUE 见 base/limits.h（已在上方 include）
 
     //类型记录码
     enum class RecordType : uint8_t

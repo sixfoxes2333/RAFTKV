@@ -1,5 +1,5 @@
 #include "storage/storage.h"
-#include "storage/be32.h" //文件头读写用到 append_be32 / read_be32
+#include "base/be32.h" //文件头读写用到 append_be32 / read_be32
 #include<cstring>
 #include<fcntl.h>
 #include<unistd.h>

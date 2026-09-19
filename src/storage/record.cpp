@@ -1,5 +1,5 @@
 #include "storage/record.h"
-#include "storage/be32.h"
+#include "base/be32.h"
 
 namespace kv
 {
