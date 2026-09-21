@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(KV LANGUAGES CXX)
 
+find_package(Threads REQUIRED)   #StorageWorker 的后台线程
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -46,6 +48,12 @@ ${STORAGE_SRC})
 add_executable(test_protocol
 tests/test_protocol.cpp
 src/net/protocol.cpp)
+
+add_executable(test_storage_worker
+tests/test_storage_worker.cpp
+src/app/storage_worker.cpp
+src/net/protocol.cpp
+${STORAGE_SRC})
 target_include_directories(kvserver PRIVATE src)
 target_include_directories(kvclient PRIVATE src)
 target_include_directories(test_storage PRIVATE src)
@@ -53,4 +61,6 @@ target_include_directories(test_noncopyable PRIVATE src)
 target_include_directories(test_recovery PRIVATE src)
 target_include_directories(crash_writer PRIVATE src)
 target_include_directories(test_protocol PRIVATE src)
+target_include_directories(test_storage_worker PRIVATE src)
+target_link_libraries(test_storage_worker PRIVATE Threads::Threads)
 

@@ -1,0 +1,105 @@
+#ifndef APP_STORAGE_WORKER_H
+#define APP_STORAGE_WORKER_H
+
+#include "net/protocol.h"
+#include "storage/storage.h"
+#include <atomic>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+
+namespace kv
+{
+
+    //从 Reator 线程送进后台线程一个任务
+    struct StorageTask
+    {
+        int fd = -1; //用于回包 结果写回哪个 fd
+        uint64_t connection_id = 0; //连接身份 fd 会被复用所以要保存以防止回错连接
+        uint64_t sequence = 0; //投递序号
+        Request request; //已解析好的协议请求
+    };
+
+    //后台线程执行完，从队列取回结果
+    struct StorageCompletion
+    {
+        int fd = -1;
+        uint64_t connection_id = 0;
+        uint64_t sequence = 0;
+        Response response; //要编码发回客户端的响应
+    };
+
+    class StorageWorker
+    {
+    public:
+        //path 数据库文件 max_pending 队列上限
+        explicit StorageWorker(const std::string & path,size_t max_pending = 1024);
+        ~StorageWorker();
+
+        //不可复制或移动
+        StorageWorker(const StorageWorker&) = delete;
+        StorageWorker& operator=(const StorageWorker&) = delete;
+        StorageWorker(StorageWorker&&) = delete;
+        StorageWorker& operator=(StorageWorker&&) = delete;
+
+
+        //构造成功为 true ，否则为该 worker 不可用
+        bool ready()const
+        {
+            return ready_.load();
+        }
+
+        //完成通知用的 eventfd
+        int wakeup_fd()const
+        {
+            return wakeup_fd_;
+        }
+
+        //Reactor 线程调用 只入队
+        //false worker 不可用/正在停止/队列达上限
+        bool submit(StorageTask task);
+
+        //Reactor 线程在 eventfd 可读时调用
+        std::vector<StorageCompletion> take_completed();
+
+
+
+    private:    
+        void worker_loop(); //后台线程入口
+        Response execute(const Request &req); //存储调用
+        void notify_locked(); //写 eventfd 调用要持有 mutex_
+
+        Storage storage_;
+        int wakeup_fd_ = -1;
+        size_t max_pending_ = 0;
+        std::atomic<bool>ready_{false};
+
+        std::mutex mutex_;
+        std::condition_variable cv_;
+        std::deque<StorageTask> pending_;
+        std::deque<StorageCompletion>completed_;
+        bool stopping_ = false;
+        std::thread worker_;
+
+
+    };
+
+
+
+
+
+
+
+
+
+
+
+}//namspace kv
+
+#endif

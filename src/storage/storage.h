@@ -34,6 +34,14 @@ namespace kv
         Storage(Storage&&) = delete;
         Storage& operator=(Storage&&) = delete;
 
+        //查询内存索引
+        //worker 区分 key 不存在 与 操作失败
+        //get/del 返回 false 可能是 NotFound 也可可能是 CRC/IO 错误
+        bool contains(const std::string &key)const
+        {
+            return index_.find(key) != index_.end();
+        }
+
 
         bool good() const
         {
