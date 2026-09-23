@@ -1,6 +1,7 @@
 #ifndef CONNECTION_H
 #define CONNECTION_H
 #include "base/buffer.h"
+#include "base/limits.h"
 #include<functional>
 #include<unistd.h>
 #include<cstdint>
@@ -13,6 +14,11 @@ using EventCallback = std::function<void (Connection*)>;
 
 //连接默认关注的事件 : 可读 + 对端半关闭通知
 const uint32_t CONN_BASE_EVENTS = EPOLLIN | EPOLLRDHUP;
+
+//发送队列水位
+const size_t OUT_HIGH_WATER = 2*1024*1024; //2MB 超过则暂停读
+const size_t OUT_LOW_WATER = 512*1024; //512KB 降到 512 KB 才恢复读
+const size_t OUT_HARD_CAP = kv::MAX_MESSAGE + 1024*1024; //17MB 超出则放弃连接
 
 
 //前置声明
@@ -31,7 +37,6 @@ public:
 
     Connection(const Connection&) = delete;
     Connection& operator = (const Connection&) = delete;
-
     Connection(Connection&&) = delete;
     Connection& operator = (Connection&&) = delete;
 
@@ -80,6 +85,38 @@ public:
         return peer_closed_;
     }
 
+    //在途请求 即已经提交给后台线程结果还没回来的请求个数
+    void add_pending_request()
+    {
+        pending_requests_++;
+    }
+
+    void finish_pending_request()
+    {
+        if(pending_requests_ > 0)
+        {
+            pending_requests_--;
+        }
+    }
+
+    size_t pending_requests()const
+    {
+        return pending_requests_;
+    }
+
+
+
+    //连接身份由 reactor 在 add_connection 时分配 单增 永不复用
+    uint64_t connection_id()const
+    {
+        return connection_id_;
+    }
+
+    void set_connection_id(uint64_t id)
+    {
+        connection_id_ = id;
+    }
+
 
 
     int fd() const
@@ -92,6 +129,27 @@ public:
         return reactor_;
     }
 
+
+    //暂停读方向。只动 EPOLLIN 保留 EPOLLRDHUP
+    void pause_read()
+    {
+        read_paused_ = true;
+        set_events((events_ & ~EPOLLIN) | EPOLLRDHUP);
+    }
+
+    //恢复读方向
+    void resume_read()
+    {
+        read_paused_ = false;
+        set_events(events_ | EPOLLIN | EPOLLRDHUP);
+    }
+
+    bool read_paused()const
+    {
+        return read_paused_;
+    }
+
+
 private:
     int fd_;
     Reactor *reactor_;
@@ -101,6 +159,12 @@ private:
     uint32_t events_ = 0; //当前在 epoll 中关注的掩码
 
     bool peer_closed_ = false; //标识对端是否关闭了写方向 (半关闭)
+
+    uint64_t connection_id_ = 0; //连接代数 0 = 未分配
+
+    size_t pending_requests_ = 0; //在途请求数
+
+    bool read_paused_ = false; //读方向是否因为发送队列水位被暂停
 
 };
 

@@ -32,6 +32,10 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kvproto import (OP_SET, OP_GET, ST_OK, ST_NOTFOUND,  # noqa: E402
+                     encode_request, decode_response, recv_frame)
+
 SERVER = os.environ.get("KV_SERVER", "build/kvserver")
 PORT = int(os.environ.get("KV_PORT", "9006"))
 SERVER_LOG = "/tmp/kv_halfclose_server.log"
@@ -97,38 +101,52 @@ def recv_frames(sock, want: int):
 
 
 def main() -> int:
-    msgs = [b"hello", b"world", b"half-close!"]
+    #三条请求：SET / GET / GET(不存在) —— 发完就半关闭，等价于 kvclient 的用法
+    reqs = [
+        (OP_SET, b"hc", b"v1"),
+        (OP_GET, b"hc", b""),
+        (OP_GET, b"missing", b""),
+    ]
+    expect = [(ST_OK, b""), (ST_OK, b"v1"), (ST_NOTFOUND, b"")]
 
     print(f"[半关闭测试] 启动服务器 {SERVER}")
     proc = start_server()
     try:
         s = socket.create_connection(("127.0.0.1", PORT))
-        for m in msgs:                            # 1) 发三条请求
-            s.sendall(frame(m))
+        for op, k, v in reqs:                     # 1) 一次写入三条请求
+            s.sendall(encode_request(op, k, v))
 
         s.shutdown(socket.SHUT_WR)                # 2) 半关闭：我不再发了
         print("  已发送 3 条请求并 shutdown(SHUT_WR)，等待回复…")
 
-        got, complete = recv_frames(s, len(msgs))
+        # 逐条读回响应（同样的 framing：4 字节长度头 + payload）
+        results = []
+        complete = True
+        for _ in reqs:
+            body = recv_frame(s)
+            if body is None:
+                complete = False
+                break
+            results.append(decode_response(body))
 
         # 3) 回复收完后，服务器应该关闭连接：再读一次应当是 EOF
         tail = s.recv(1)
         s.close()
 
         ok = True
-        if not complete or len(got) != len(msgs):
-            print(f"  FAIL：期望 {len(msgs)} 条回复，实际收到 {len(got)} 条")
+        if not complete or len(results) != len(reqs):
+            print(f"  FAIL：期望 {len(reqs)} 条回复，实际收到 {len(results)} 条")
             ok = False
-        for i, (g, w) in enumerate(zip(got, msgs)):
-            if g != w:
-                print(f"  FAIL：第 {i} 条回复不一致（收到 {g!r}，期望 {w!r}）")
+        for i, (got, want) in enumerate(zip(results, expect)):
+            if got != want:
+                print(f"  FAIL：第 {i} 条回复不一致（收到 {got!r}，期望 {want!r}）")
                 ok = False
         if tail != b"":
             print(f"  FAIL：回复收完后仍能读到数据 {tail!r}，服务器没有关闭连接")
             ok = False
 
         if ok:
-            print(f"  收到 {len(got)} 条回复，内容全部一致，服务器随后关闭连接")
+            print(f"  收到 {len(results)} 条回复，内容全部一致，服务器随后关闭连接")
             print("[半关闭测试] PASS")
             return 0
         print(f"  服务器日志：{SERVER_LOG}")

@@ -13,7 +13,8 @@ Reactor::~Reactor()
 bool Reactor::loop()
 {
     struct epoll_event events[1024];
-    while(true)
+    running_ = true;
+    while(running_)
     {
         //epoll_wait 返回准备好进行 I/O 操作 fd 的数量
         int n = epoll_wait(epfd_,events,1024,-1);
@@ -99,6 +100,9 @@ bool Reactor::mod_event(int fd,Connection *conn,uint32_t events)
 
 void Reactor::add_connection(int fd,std::unique_ptr<Connection>conn,u_int32_t events)
 {
+
+    conn->set_connection_id(next_conn_id_++);//分配连接代数
+    
     conn->set_events(events); // Connection 的记录与注册值保持一致
     if(!add_event(fd,conn.get(),events)) //注册
     {
@@ -128,4 +132,27 @@ void Reactor::drain_pending_close()
     }
 
     pending_close_.clear();
+}
+
+Connection* Reactor::find_connection(int fd,uint64_t connection_id)
+{
+    auto it = connections_.find(fd);
+
+    if(it == connections_.end())
+    {
+        return nullptr; //连接已经关闭并销毁
+    }
+
+    if(it->second->connection_id() != connection_id)
+    {
+        return nullptr; //同一 fd 号，但是已经是另一连接
+    }
+
+    return it->second.get();
+}
+
+
+void Reactor::stop()
+{
+    running_ = false;
 }

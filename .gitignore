@@ -1,2 +1,10 @@
 build/
 kvserver
+
+# 运行时数据文件（服务器默认 db 路径 / 手动冒烟留下的）
+kvdb.data
+*.data
+
+# Python 测试产生的缓存
+__pycache__/
+*.pyc

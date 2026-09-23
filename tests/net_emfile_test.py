@@ -34,6 +34,10 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kvproto import (OP_SET, OP_GET, ST_OK,  # noqa: E402
+                     encode_request, decode_response, recv_frame)
+
 SERVER = os.environ.get("KV_SERVER", "build/kvserver")
 PORT = int(os.environ.get("KV_PORT", "9006"))
 SERVER_LOG = "/tmp/kv_emfile_server.log"
@@ -102,26 +106,20 @@ def cpu_seconds(pid: int):
     return (int(rest[11]) + int(rest[12])) / CLK_TCK
 
 
-def echo_once(sock: socket.socket, payload: bytes, timeout: float) -> bool:
-    """在一条已建立的连接上发一条消息，验证能收到完整回显"""
-    sock.settimeout(timeout)
+def kv_once(sock: socket.socket, key: bytes, value: bytes, timeout: float) -> bool:
+    """在一条已建立的连接上做一次 SET + GET，验证服务器仍能正常读写"""
     try:
-        sock.sendall(frame(payload))
-        head = b""
-        while len(head) < 4:
-            chunk = sock.recv(4 - len(head))
-            if not chunk:
-                return False
-            head += chunk
-        need = struct.unpack(">I", head)[0]
-        got = b""
-        while len(got) < need:
-            chunk = sock.recv(min(65536, need - len(got)))
-            if not chunk:
-                return False
-            got += chunk
-        return got == payload
-    except OSError:
+        sock.settimeout(timeout)
+        sock.sendall(encode_request(OP_SET, key, value))
+        body = recv_frame(sock, timeout)
+        if body is None or decode_response(body) != (ST_OK, b""):
+            return False
+        sock.sendall(encode_request(OP_GET, key))
+        body = recv_frame(sock, timeout)
+        if body is None:
+            return False
+        return decode_response(body) == (ST_OK, value)
+    except (OSError, ValueError):
         return False
 
 
@@ -160,9 +158,9 @@ def main() -> int:
         # ---- 3. 已有连接还得能用（服务没被 fd 耗尽搞死）----
         served = 0
         for i, s in enumerate(socks):
-            if echo_once(s, b"emfile-" + str(i).encode(), 3.0):
+            if kv_once(s, b"emfile-" + str(i).encode(), b"v", 3.0):
                 served += 1
-        print(f"  {established} 个已建立连接中，仍能正常回显的有 {served} 个")
+        print(f"  {established} 个已建立连接中，仍能正常读写的连接有 {served} 个")
 
         ok_cpu = (cpu is not None) and (cpu < CPU_BUDGET)
         ok_serving = (served > 0)

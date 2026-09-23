@@ -34,6 +34,13 @@ public:
     //申请关闭 实际关闭在 drain_pending_close()中
     void request_close(Connection*c);
 
+    //按照 fd 与 连接代数 找回连接
+    Connection* find_connection(int fd,uint64_t connection_id);
+
+
+    //停止事件循环
+    void stop();
+
 
 private:
     int epfd_;    
@@ -44,6 +51,10 @@ private:
 
     //标记批次内申请关闭的 fd_
     std::vector<int> pending_close_;
+
+    uint64_t next_conn_id_ = 1; //连接代数分配器，从 1 开始， 0 保留给未分配
+
+    bool running_ = false; //loop 的运行标志
 
 };
 

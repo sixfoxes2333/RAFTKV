@@ -47,6 +47,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kvproto import OP_SET, OP_GET, ST_OK, encode_request, recv_frame  # noqa: E402
+
 SERVER = os.environ.get("KV_SERVER", "build/kvserver")
 PORT = int(os.environ.get("KV_PORT", "9006"))
 SERVER_LOG = "/tmp/kv_backpressure_server.log"
@@ -111,20 +114,29 @@ def main() -> int:
     print(f"[背压测试] 启动服务器 {SERVER}（KV_TEST_SNDBUF=4096）")
     proc = start_server()
     try:
-        # ---- 建连接：先把收缓冲压小，再 connect（窗口大小在握手时就要小） ----
+        # ---- 先把 8MB 的 value 存进服务器（用另一条普通连接，别影响围栏的缓冲设置） ----
+        setup = socket.create_connection(("127.0.0.1", PORT), timeout=SEND_TIMEOUT)
+        setup.sendall(encode_request(OP_SET, b"big", payload))
+        pre = recv_frame(setup, SEND_TIMEOUT)
+        setup.close()
+        if pre is None or pre[0] != ST_OK:
+            print(f"  !! 预置数据失败（SET big 未返回 Ok，收到 {pre!r}）")
+            return 1
+
+        # ---- 建被观测的连接：先把收缓冲压小，再 connect（窗口大小在握手时就要小） ----
         s = socket.socket()
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
         s.connect(("127.0.0.1", PORT))
         real_rcvbuf = s.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
         # 内核会把设置值加倍（4KB → 8KB），打印实际值供诊断
         print(f"  客户端 SO_RCVBUF 实际值 = {real_rcvbuf} 字节")
-        print(f"  发送单条 {len(payload)} 字节的消息（协议：4 字节长度头 + 内容）")
+        print(f"  发送 GET big（value {len(payload)} 字节；线上总长 = 4 + 5 + {len(payload)}）")
 
         t0 = time.time()
         #发送阶段的超时：没有它时 sendall 可能永久阻塞，整脚本只能靠外部 timeout 杀
         s.settimeout(SEND_TIMEOUT)
         try:
-            s.sendall(frame(payload))
+            s.sendall(encode_request(OP_GET, b"big"))
         except socket.timeout:
             print(f"  !! 发送超时（{SEND_TIMEOUT}s）—— 服务器可能没有在读")
             s.close()
@@ -164,10 +176,10 @@ def main() -> int:
         else:
             reply_len = struct.unpack(">I", header)[0]
             print(f"  回复帧头声明长度 = {reply_len} 字节")
-            if reply_len != len(payload):
-                print(f"  !! 回复长度和请求不一致（期望 {len(payload)}）")
+            if reply_len != 5 + len(payload):   #响应 payload = [1B status][4B vlen][value]
+                print(f"  !! 回复长度不符（期望 {5 + len(payload)}）")
             # 防御：长度头离谱时不去读它
-            target = reply_len if 0 < reply_len <= 64 * 1024 * 1024 else len(payload)
+            target = reply_len if 0 < reply_len <= 64 * 1024 * 1024 else 5 + len(payload)
             while len(got) < target:
                 remain = READ_TIMEOUT - (time.time() - t0)
                 if remain <= 0:
@@ -189,27 +201,31 @@ def main() -> int:
         s.close()
 
         # ---- 判定 ----
-        ok_len = (len(got) == len(payload))
-        ok_content = (bytes(got) == payload)
+        ok_len = (len(got) == 5 + len(payload))
+        ok_status = (len(got) >= 5 and got[0] == ST_OK
+                     and struct.unpack(">I", bytes(got[1:5]))[0] == len(payload))
+        ok_content = (bytes(got[5:]) == payload)
         ok_no_eof = not early_eof
 
         print(f"  收到 {len(got)}/{len(payload)} 字节，用时 {elapsed:.2f}s，"
               f"提前 EOF = {early_eof}")
 
-        if ok_len and ok_content and ok_no_eof:
+        if ok_len and ok_status and ok_content and ok_no_eof:
             print("[背压测试] PASS")
             return 0
 
         print("[背压测试] FAIL")
         if not ok_len:
-            print(f"  原因：长度不足（少 {len(payload) - len(got)} 字节）")
+            print(f"  原因：长度不足（少 {5 + len(payload) - len(got)} 字节）")
+        if ok_len and not ok_status:
+            print("  原因：状态或 vlen 字段不对")
         if early_eof:
             print("  原因：服务器在响应发完之前就关闭了连接 —— "
                   "典型症状是 handle_write 的 EAGAIN 分支走进了错误处理")
         if ok_len and not ok_content:
-            for i, (a, b) in enumerate(zip(bytes(got), payload)):
+            for i, (a, b) in enumerate(zip(bytes(got[5:]), payload)):
                 if a != b:
-                    print(f"  原因：内容在第 {i} 字节不一致（收到 {a:#x}，期望 {b:#x}）")
+                    print(f"  原因：value 在第 {i} 字节不一致（收到 {a:#x}，期望 {b:#x}）")
                     break
         print(f"  服务器日志：{SERVER_LOG}")
         return 1

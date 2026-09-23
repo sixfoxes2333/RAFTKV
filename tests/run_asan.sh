@@ -110,6 +110,30 @@ else
     echo "       服务器日志里没有 sanitizer 报告"
 fi
 
+# ---- 4. 端到端场景：协议 + 后台存储线程 + kill -9 重启（多线程路径也要过 sanitizer）----
+E2E_CLIENT_LOG=/tmp/kv_asan_e2e.log
+E2E_SERVER_LOG=/tmp/kv_e2e.log
+rm -f "$E2E_CLIENT_LOG" "$E2E_SERVER_LOG"
+
+echo "[ASan] 运行单节点端到端场景（服务器=$KV_SERVER）"
+python3 "$REPO/tests/kv_protocol_test.py" > "$E2E_CLIENT_LOG" 2>&1 || true
+
+if grep -q "\[KV 协议测试\] PASS" "$E2E_CLIENT_LOG" 2>/dev/null; then
+    echo "       客户端结论：$(grep -E '\[KV 协议测试\] (PASS|FAIL)' "$E2E_CLIENT_LOG" | tail -1)"
+else
+    echo "       !! 端到端场景没有通过 —— 本次结果不能作为通过依据"
+    tail -8 "$E2E_CLIENT_LOG" 2>/dev/null
+    fail=1
+fi
+
+if grep -qE "$SAN_PATTERN" "$E2E_SERVER_LOG" 2>/dev/null; then
+    echo "       !! 端到端服务器触发了 sanitizer 报告："
+    grep -nE "$SAN_PATTERN" "$E2E_SERVER_LOG" | head -5
+    fail=1
+else
+    echo "       端到端服务器日志里没有 sanitizer 报告"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
     echo "[ASan] PASS（没有内存/UB 错误）"

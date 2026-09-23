@@ -43,6 +43,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kvproto import OP_SET, OP_GET, ST_OK, encode_request, recv_frame  # noqa: E402
+
 SERVER = os.environ.get("KV_SERVER", "build/kvserver")
 PORT = int(os.environ.get("KV_PORT", "9006"))
 SERVER_LOG = "/tmp/kv_halfclose_flush_server.log"
@@ -150,10 +153,20 @@ def main() -> int:
         real_rcvbuf = s.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
         print(f"  客户端 SO_RCVBUF 实际值 = {real_rcvbuf} 字节（内核会把设置值加倍）")
 
-        print(f"  发送 {len(payload)} 字节请求，随即 shutdown(SHUT_WR)（半关闭）")
+        # ---- 先把 8MB 的 value 存进服务器（另一条普通连接，避免干扰围栏） ----
+        setup = socket.create_connection(("127.0.0.1", PORT), timeout=SEND_TIMEOUT)
+        setup.sendall(encode_request(OP_SET, b"big", payload))
+        pre = recv_frame(setup, SEND_TIMEOUT)
+        setup.close()
+        if pre is None or pre[0] != ST_OK:
+            print(f"  !! 预置数据失败（SET big 未返回 Ok，收到 {pre!r}）")
+            s.close()
+            return 1
+
+        print(f"  发送 GET big（value {len(payload)} 字节），随即 shutdown(SHUT_WR)（半关闭）")
         s.settimeout(SEND_TIMEOUT)   #发送阶段也要有超时，否则 sendall 可能永久阻塞
         try:
-            s.sendall(frame(payload))
+            s.sendall(encode_request(OP_GET, b"big"))
         except socket.timeout:
             print(f"  !! 发送超时（{SEND_TIMEOUT}s）")
             s.close()
@@ -182,19 +195,22 @@ def main() -> int:
         header = recv_exact(s, 4, deadline)
         got = b""
         reply_len = None
-        ok_hdr = ok_len = ok_content = eof_after_full = False
+        ok_hdr = ok_len = ok_status = ok_content = eof_after_full = False
 
         if len(header) < 4:
             print(f"  只收到 {len(header)} 字节帧头就 EOF（服务器提前关了连接）")
         else:
             reply_len = struct.unpack(">I", header)[0]
-            ok_hdr = (reply_len == len(payload))
+            expect = 5 + len(payload)   #响应 payload = [1B status][4B vlen][value]
+            ok_hdr = (reply_len == expect)
             print(f"  回复帧头声明长度 = {reply_len} 字节"
-                  f"{'' if ok_hdr else f'（与请求的 {len(payload)} 不一致）'}")
+                  f"{'' if ok_hdr else f'（期望 {expect}）'}")
 
-            got = recv_exact(s, reply_len if reply_len <= PAYLOAD_SIZE * 2 else len(payload), deadline)
-            ok_len = (len(got) == len(payload))
-            ok_content = (got == payload)
+            got = recv_exact(s, reply_len if reply_len <= PAYLOAD_SIZE * 2 else expect, deadline)
+            ok_len = (len(got) == expect)
+            ok_status = (len(got) >= 5 and got[0] == ST_OK
+                         and struct.unpack(">I", got[1:5])[0] == len(payload))
+            ok_content = (got[5:] == payload)
 
             # 收满之后，服务器应当很快关闭连接 → 读到 EOF
             s.settimeout(10.0)
@@ -205,14 +221,14 @@ def main() -> int:
 
         elapsed = time.time() - t0
         s.close()
-        print(f"  收到 {len(got)}/{len(payload)} 字节，用时 {elapsed:.2f}s，"
+        print(f"  收到 {len(got)}/{5 + len(payload)} 字节，用时 {elapsed:.2f}s，"
               f"收满后才 EOF = {eof_after_full}")
 
         if elapsed < 0.05:
             # 不是失败判据：8MB 远超"客户端收缓冲 + 服务器发送缓冲"的容量，
             # 所以在"客户端不读"的窗口里，必然有一部分数据只能排队在服务器自己的 out_ 里
             print("  （提示：收满得很快，但 8MB 仍超出两端缓冲容量 —— 说明确有数据曾排在服务器侧）")
-        if ok_hdr and ok_len and ok_content and eof_after_full and ok_cpu:
+        if ok_hdr and ok_len and ok_status and ok_content and eof_after_full and ok_cpu:
             print("[半关闭+大回复] PASS")
             return 0
 
@@ -220,12 +236,14 @@ def main() -> int:
         if not ok_hdr:
             print("  原因：回复帧头声明的长度与请求不符")
         if not ok_len:
-            print(f"  原因：回复长度不足（少 {len(payload) - len(got)} 字节）"
+            print(f"  原因：回复长度不足（少 {5 + len(payload) - len(got)} 字节）"
                   " —— 待发数据被提前关闭丢掉了")
+        if ok_len and not ok_status:
+            print("  原因：状态或 vlen 字段不对")
         if ok_len and not ok_content:
-            for i, (a, b) in enumerate(zip(got, payload)):
+            for i, (a, b) in enumerate(zip(got[5:], payload)):
                 if a != b:
-                    print(f"  原因：内容在第 {i} 字节不一致（收到 {a:#x}，期望 {b:#x}）")
+                    print(f"  原因：value 在第 {i} 字节不一致（收到 {a:#x}，期望 {b:#x}）")
                     break
         if not eof_after_full:
             print("  原因：收满回复后服务器没有关闭连接（或关闭得太慢）")

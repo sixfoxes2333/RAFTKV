@@ -12,7 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 #编译警告：必须写在所有 add_executable 之前，否则对已创建的 target 不生效（add_compile_options 只影响之后创建的 target）
 add_compile_options(-Wall -Wextra)
 
-#按层分组：网络层 / 存储层
+#按层分组：网络层 / 存储层 / 应用层（协议编解码 + 后台存储线程）
 set(NET_SRC
 src/net/reactor.cpp
 src/net/connection.cpp
@@ -22,12 +22,23 @@ set(STORAGE_SRC
 src/storage/storage.cpp
 src/storage/record.cpp)
 
+set(PROTO_SRC
+src/net/protocol.cpp)
+
+set(APP_SRC
+src/app/storage_worker.cpp)
+
 add_executable(kvserver
 src/main.cpp
-${NET_SRC})
+${NET_SRC}
+${STORAGE_SRC}
+${PROTO_SRC}
+${APP_SRC})
+target_link_libraries(kvserver PRIVATE Threads::Threads)   #StorageWorker 的后台线程
 
 add_executable(kvclient
-src/tools/client.cpp)
+src/tools/client.cpp
+${PROTO_SRC})
 
 add_executable(test_storage
 tests/test_storage.cpp

@@ -36,7 +36,7 @@ echo "构建完成"
 fail=0
 
 echo
-echo "== 1/8 存储单元测试（记录/文件头/put/get/del）=="
+echo "== 1/11 存储单元测试（记录/文件头/put/get/del）=="
 if ./build/test_storage > /tmp/kv_test_storage.log 2>&1; then
     echo "PASS（日志 /tmp/kv_test_storage.log）"
 else
@@ -46,7 +46,7 @@ else
 fi
 
 echo
-echo "== 2/8 存储恢复（keydir 重建 / torn-tail 截断 / CRC 损坏拒绝）=="
+echo "== 2/11 存储恢复（keydir 重建 / torn-tail 截断 / CRC 损坏拒绝）=="
 if ./build/test_recovery > /tmp/kv_test_recovery.log 2>&1; then
     echo "PASS（日志 /tmp/kv_test_recovery.log）"
 else
@@ -56,7 +56,7 @@ else
 fi
 
 echo
-echo "== 3/8 半关闭回归（小消息）=="
+echo "== 3/11 半关闭回归（小消息）=="
 if python3 tests/net_halfclose_test.py; then
     :
 else
@@ -64,7 +64,7 @@ else
 fi
 
 echo
-echo "== 4/8 半关闭 + 大回复围栏（先发完再关 + 不空转）=="
+echo "== 4/11 半关闭 + 大回复围栏（先发完再关 + 不空转）=="
 if python3 tests/net_halfclose_flush_test.py; then
     :
 else
@@ -72,7 +72,7 @@ else
 fi
 
 echo
-echo "== 5/8 背压回归 =="
+echo "== 5/11 背压回归 =="
 if python3 tests/net_backpressure_test.py; then
     :
 else
@@ -80,7 +80,15 @@ else
 fi
 
 echo
-echo "== 6/8 fd 用尽（EMFILE）不许空转 =="
+echo "== 6/11 发送队列水位线（硬上限 / 暂停读后恢复 / 内存有界）=="
+if python3 tests/net_outqueue_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== 7/11 fd 用尽（EMFILE）不许空转 =="
 if python3 tests/net_emfile_test.py; then
     :
 else
@@ -88,7 +96,7 @@ else
 fi
 
 echo
-echo "== 7/8 启动失败必须响亮地退出（端口被占）=="
+echo "== 8/11 启动失败必须响亮地退出（端口被占）=="
 if python3 tests/net_startup_fail_test.py; then
     :
 else
@@ -96,7 +104,23 @@ else
 fi
 
 echo
-echo "== 8/8 拷贝/移动契约（编译期 static_assert）=="
+echo "== 9/11 单节点 KV 端到端（协议 / 流水线 / 大 value / 并发 / kill -9 重启）=="
+if python3 tests/kv_protocol_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== 10/11 kvclient 命令行（退出码 / 二进制 value / 与 Python 客户端互通）=="
+if python3 tests/kv_client_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== 11/11 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :
 else
@@ -105,7 +129,7 @@ fi
 
 if [ "${1:-}" = "--slow" ]; then
     echo
-    echo "== 附加（慢）：崩溃注入 + 写失败故障注入 =="
+    echo "== 附加（慢）：崩溃注入 + 写失败故障注入 + 慢 fsync 注入 =="
     if python3 tests/crash_inject_test.py; then
         :
     else
@@ -113,6 +137,13 @@ if [ "${1:-}" = "--slow" ]; then
     fi
 
     if python3 tests/fail_inject_test.py; then
+        :
+    else
+        fail=$((fail + 1))
+    fi
+
+    # 慢 fsync：验证事件循环没被 fsync 堵住（快路径 <100ms），并记录单 worker 的串行代价
+    if python3 tests/slow_fsync_test.py; then
         :
     else
         fail=$((fail + 1))

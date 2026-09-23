@@ -1,4 +1,6 @@
 #include "net/reactor.h"
+#include "app/storage_worker.h"
+#include "net/protocol.h"
 #include<sys/socket.h>
 #include<netinet/in.h>
 #include<fcntl.h>
@@ -9,6 +11,11 @@
 #include<memory>
 
 int g_idle_fd = -1;//预留占位 fd
+
+bool g_fatal = false; //全局致命标志
+
+kv::StorageWorker *g_worker = nullptr; //后台存储线程 Reactor 投递任务
+uint64_t g_next_sequence = 0; //任务序号
 
 const int MAX_MESSAGE = 16 * 1024 *1024; //防止恶意长度炸内存
 
@@ -28,6 +35,8 @@ bool setnonblocking(int fd)
 
     return true;
 }
+
+void update_out_watermark(Connection* c);
 
 //短写续写
 void handle_write(Connection* c)
@@ -63,7 +72,9 @@ void handle_write(Connection* c)
         }
     }
 
-    if(c->peer_closed())
+    update_out_watermark(c);
+
+    if(c->peer_closed() && c->pending_requests() == 0)
     {
         c->reactor()->request_close(c); //对端不会再发，则本体也不再发送
         return;
@@ -73,16 +84,84 @@ void handle_write(Connection* c)
 
 }
 
+//待发队列水位高则暂停读，低则恢复读
+void update_out_watermark(Connection* c)
+{
+    if(c->peer_closed())
+    {
+        return; //读方向关
+    }
+
+    if(!c->read_paused() && c->out_.readable() >= OUT_HIGH_WATER)
+    {
+        c->pause_read(); //停止接收新请求
+    }
+    else if(c->read_paused() && c->out_.readable() <= OUT_LOW_WATER)
+    {
+        c->resume_read();
+    }
+
+}
+
+
+//发送一条响应
+void send_response(Connection* c,const kv::Response& resp)
+{
+    std::string body = kv::encode_response(resp);
+
+    //上限 对端一直不读，待发数据无界增长
+    if(c->out_.readable() + 4 + body.size() > OUT_HARD_CAP)
+    {
+        std::cerr << "send queue overflow fd = " << c->fd() << std::endl;
+        c->reactor()->request_close(c);
+        return;
+    }
+
+    uint32_t be = htonl(static_cast<uint32_t>(body.size()));
+
+    c->out_.append(reinterpret_cast<const char*>(&be),4);
+    c->out_.append(body.data(),body.size());
+
+    update_out_watermark(c);
+    handle_write(c);
+}
+
+//错误响应
+void send_error(Connection* c)
+{
+    kv::Response resp;
+    resp.status = kv::Status::Error;
+    send_response(c,resp);
+}
+
+
 //处理消息
 void handle_message(Connection *c , const char *payload , size_t len)
 {
-    uint32_t be = htonl(len);
+    kv::Request req;
 
-    //echo 以后再改 SET/GET
+    //解析失败
+    if(!kv::parse_request(payload,len,req))
+    {
+        send_error(c);
+        return;
+    }
 
-    c->out_.append(reinterpret_cast<const char*>(&be),4); //追加长度头
-    c->out_.append(payload,len);
-    handle_write(c);
+    kv::StorageTask task;
+    task.fd = c->fd(); //回信地址
+    task.connection_id = c->connection_id(); //连接代数
+    task.sequence = ++g_next_sequence; //投递序号
+    task.request = std::move(req);
+
+    //投递失败
+    if(!g_worker->submit(std::move(task)))
+    {
+        send_error(c);
+        return;
+    }
+
+    c->add_pending_request();
+
 }
 
 
@@ -156,7 +235,7 @@ void handle_read(Connection* c)
             c->mark_peer_closed();
 
             //没有待发数据
-            if(c->out_.readable() == 0)
+            if(c->out_.readable() == 0 && c->pending_requests() == 0)
             {
                 c->reactor()->request_close(c);
             }
@@ -165,7 +244,12 @@ void handle_read(Connection* c)
                 //还有回复未发送
                 //关掉读，再等 EPOLLOUT 把数据发完
                 c->close_read();
-                c->enable_write();
+
+                //有数据要发才关注可写
+                if(c->out_.readable() > 0)
+                {
+                    c->enable_write();
+                }
             }
 
             return;
@@ -256,10 +340,63 @@ void handle_accept(Connection *lc)
     
 }
 
-
-int main()
+//查连接 编码并回包
+void handle_storage_events(Connection* w)
 {
-    
+    auto done = g_worker->take_completed();
+   
+    for(auto &item : done)
+    {
+        //按照 fd 与 连接代数找回连接
+        Connection* c = w->reactor()->find_connection(item.fd,item.connection_id);
+
+        if(c == nullptr)
+        {
+            continue;
+        }
+
+        if(c->closing())
+        {
+            continue;
+        }
+
+        //减掉在途计数 再打包
+        c->finish_pending_request();
+
+        send_response(c,item.response);
+
+    }
+
+    //worker 不可用
+    if(!g_worker->ready())
+    {
+        std::cerr << "storage worker unavailable,shutting down " << std::endl;
+        g_fatal = true;
+        w->reactor()->stop();
+    }
+
+}
+
+
+int main(int argc,char* argv[])
+{
+
+    //数据库默认路径
+    const char* db_path = (argc > 1) ? argv[1] : "kvdb.data";
+
+
+    //存储 worker 先于 Reactor 创建
+    kv::StorageWorker worker(db_path);
+
+    if(!worker.ready())
+    {
+        std::cerr << "storage worker init failed : " << db_path << std::endl;
+        return 1;
+    }
+    g_worker = &worker;
+
+
+
     //监听  IPV4 协议 TCP 拿取到文件描述符
     int listenfd = socket(AF_INET,SOCK_STREAM,0);
     if(listenfd < 0)
@@ -322,5 +459,23 @@ int main()
     
     reactor.add_connection(listenfd,std::move(lc),CONN_BASE_EVENTS);
 
-    return reactor.loop()? 0 : 1;
+    //将 worker 的 eventfd 复制进 epoll
+    int wake_fd = fcntl(worker.wakeup_fd(),F_DUPFD_CLOEXEC,0);//F_DUPFD_CLOEXEC 复制 + 自动 close-on-exec
+    if(wake_fd < 0)
+    {
+        std::cerr << "dup wakeup fd failed : " << strerror(errno) << std::endl;
+        return 1;
+    }
+
+    
+    auto wake_conn = std::make_unique<Connection>(wake_fd,&reactor);
+    wake_conn->on_read = handle_storage_events;
+    wake_conn->on_write = nullptr;
+
+    //只关注 EPOLLIN
+    reactor.add_connection(wake_fd,std::move(wake_conn),EPOLLIN);
+
+    bool ok = reactor.loop();
+
+    return (ok && !g_fatal) ? 0 : 1;
 }

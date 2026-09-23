@@ -12,6 +12,7 @@
  *   KV_FAIL_WRITE_CALL=N      第 N 次 write()（1-based，只计对 fd>2 的调用）返回 -1/ENOSPC
  *   KV_FAIL_FTRUNCATE_CALL=N  第 N 次 ftruncate() 返回 -1/EIO
  *   KV_FAIL_FSYNC_CALL=N      第 N 次 fsync() 返回 -1/EIO
+ *   KV_DELAY_FSYNC_MS=N       每次 fsync() 之前先睡 N 毫秒（模拟慢磁盘），不影响返回值
  *   不设置或设为 0 表示该注入关闭。
  *
  * 【为什么排除 fd <= 2】
@@ -28,6 +29,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 static int env_int(const char *name)
@@ -99,6 +101,18 @@ int fsync(int fd)
     if(real_fsync == NULL)
     {
         real_fsync = (int (*)(int))dlsym(RTLD_NEXT,"fsync");
+    }
+
+    /* KV_DELAY_FSYNC_MS：把 fsync 拖慢，用来验证"fsync 慢时事件循环还能不能服务"。
+       放在真正 fsync 之前睡，效果等价于慢设备（返回值不变，只是变慢）。 */
+    int delay_ms = env_int("KV_DELAY_FSYNC_MS");
+
+    if(delay_ms > 0)
+    {
+        struct timespec ts;
+        ts.tv_sec = delay_ms / 1000;
+        ts.tv_nsec = (long)(delay_ms % 1000) * 1000000L;
+        nanosleep(&ts,NULL);
     }
 
     int fail_at = env_int("KV_FAIL_FSYNC_CALL");
