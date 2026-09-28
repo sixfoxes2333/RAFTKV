@@ -11,6 +11,12 @@ namespace kv
     inline constexpr size_t MAX_MESSAGE = 16 * 1024 * 1024; //一个网络帧的最大长度 16MB（防恶意长度炸内存）
     inline constexpr size_t MAX_KEY     = 64 * 1024;        //key 最大 64KB
     inline constexpr size_t MAX_VALUE   = 16 * 1024 * 1024; //value 最大 16MB（与 MAX_MESSAGE 对应）
+
+    // 后台队列字节预算 限流
+    inline constexpr size_t MAX_QUEUE_BYTES = 64*1024*1024; // 64MB
+    
+    // 一条连接不能独占全局的预算
+    inline constexpr size_t MAX_CONN_QUEUE_BYTES = 32*1024*1024; //32MB
 }
 
 #endif

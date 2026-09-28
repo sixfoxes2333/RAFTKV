@@ -65,6 +65,10 @@ tests/test_storage_worker.cpp
 src/app/storage_worker.cpp
 src/net/protocol.cpp
 ${STORAGE_SRC})
+
+add_executable(kvbench
+tests/kvbench.cpp
+${PROTO_SRC})
 target_include_directories(kvserver PRIVATE src)
 target_include_directories(kvclient PRIVATE src)
 target_include_directories(test_storage PRIVATE src)
@@ -74,4 +78,6 @@ target_include_directories(crash_writer PRIVATE src)
 target_include_directories(test_protocol PRIVATE src)
 target_include_directories(test_storage_worker PRIVATE src)
 target_link_libraries(test_storage_worker PRIVATE Threads::Threads)
+target_include_directories(kvbench PRIVATE src)
+target_link_libraries(kvbench PRIVATE Threads::Threads)
 

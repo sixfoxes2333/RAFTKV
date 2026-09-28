@@ -24,6 +24,10 @@ namespace kv
         uint64_t connection_id = 0; //连接身份 fd 会被复用所以要保存以防止回错连接
         uint64_t sequence = 0; //投递序号
         Request request; //已解析好的协议请求
+
+        bool parse_failed = false; 
+
+        size_t bytes = 0; //该请求占用的字节
     };
 
     //后台线程执行完，从队列取回结果
@@ -33,6 +37,8 @@ namespace kv
         uint64_t connection_id = 0;
         uint64_t sequence = 0;
         Response response; //要编码发回客户端的响应
+
+        size_t bytes = 0; //原样带回
     };
 
     class StorageWorker
@@ -78,6 +84,9 @@ namespace kv
         Storage storage_;
         int wakeup_fd_ = -1;
         size_t max_pending_ = 0;
+
+        size_t inflight_bytes_ = 0; //队列中所有任务的请求体总字节
+
         std::atomic<bool>ready_{false};
 
         std::mutex mutex_;

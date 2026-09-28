@@ -104,6 +104,21 @@ public:
         return pending_requests_;
     }
 
+    void add_inflight_bytes(size_t n)
+    {
+        inflight_bytes_ += n;
+    }
+
+    void release_inflight_bytes(size_t n)
+    {
+        inflight_bytes_ = (inflight_bytes_ > n) ? (inflight_bytes_ - n) : 0;
+    }
+
+
+    size_t inflight_bytes()const
+    {
+        return inflight_bytes_;
+    }
 
 
     //连接身份由 reactor 在 add_connection 时分配 单增 永不复用
@@ -130,18 +145,29 @@ public:
     }
 
 
-    //暂停读方向。只动 EPOLLIN 保留 EPOLLRDHUP
+    //暂停读方向 保留 EPOLLRDHUP
     void pause_read()
     {
+        if(read_paused_)
+        {
+            return;
+        }
+
         read_paused_ = true;
-        set_events((events_ & ~EPOLLIN) | EPOLLRDHUP);
+        events_ = (events_ & ~EPOLLIN) | EPOLLRDHUP;
+        apply_events(); 
     }
 
     //恢复读方向
     void resume_read()
     {
+        if(!read_paused_)
+        {
+            return;
+        }
         read_paused_ = false;
-        set_events(events_ | EPOLLIN | EPOLLRDHUP);
+        events_ |= EPOLLIN | EPOLLRDHUP;
+        apply_events();
     }
 
     bool read_paused()const
@@ -165,6 +191,10 @@ private:
     size_t pending_requests_ = 0; //在途请求数
 
     bool read_paused_ = false; //读方向是否因为发送队列水位被暂停
+
+    void apply_events();
+
+    size_t inflight_bytes_ = 0;
 
 };
 

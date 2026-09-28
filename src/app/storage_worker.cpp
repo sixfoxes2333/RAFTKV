@@ -99,6 +99,13 @@ namespace kv
                 return false;
             }
 
+            //字节上限
+            if(inflight_bytes_ + task.bytes > MAX_QUEUE_BYTES)
+            {
+                return false;
+            }
+
+            inflight_bytes_ += task.bytes;
             pending_.push_back(std::move(task));
 
         }
@@ -135,7 +142,16 @@ namespace kv
             done.fd = task.fd;
             done.connection_id = task.connection_id;
             done.sequence = task.sequence;
-            done.response = execute(task.request);
+            done.bytes = task.bytes;
+            
+            if(task.parse_failed)
+            {
+                done.response.status = Status::Error;
+            }
+            else
+            {
+                done.response = execute(task.request);
+            }
 
             {
                 std::lock_guard<std::mutex>lock(mutex_);
@@ -271,6 +287,16 @@ namespace kv
         out.reserve(completed_.size());
         while(!completed_.empty())
         {
+            //归还字节预算，只有把完成结果交给 reactor 才算真正离开队列
+            if(inflight_bytes_ >= completed_.front().bytes)
+            {
+                inflight_bytes_ -= completed_.front().bytes;
+            }
+            else
+            {
+                inflight_bytes_ = 0;
+            }
+
             out.push_back(std::move(completed_.front()));
             completed_.pop_front();
         }

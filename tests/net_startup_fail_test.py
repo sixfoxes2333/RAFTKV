@@ -38,6 +38,11 @@ PORT = int(os.environ.get("KV_PORT", "9006"))
 SERVER_LOG_A = "/tmp/kv_startup_a.log"
 SERVER_LOG_B = "/tmp/kv_startup_b.log"
 
+#两个实例必须用【不同的数据文件】：否则第二个实例会先被数据库文件锁挡住
+#（那是 db_lock_test.py 的场景），根本走不到 bind 失败 —— 本测试验证的是"端口冲突必须响亮退出"
+DB_A = "/tmp/kv_startup_a.data"
+DB_B = "/tmp/kv_startup_b.data"
+
 EXIT_WAIT = 3.0        # 第二个实例应该在这个时间内退出
 
 
@@ -59,7 +64,11 @@ def wait_ready(proc, log_path):
 def main() -> int:
     print(f"[启动失败测试] 先正常启动一个 {SERVER}（占住 {PORT} 端口）")
     log_a = open(SERVER_LOG_A, "wb")
-    proc_a = subprocess.Popen([SERVER], stdout=log_a, stderr=subprocess.STDOUT,
+    for p in (DB_A,DB_B):
+        if os.path.exists(p):
+            os.remove(p)
+
+    proc_a = subprocess.Popen([SERVER,DB_A], stdout=log_a, stderr=subprocess.STDOUT,
                               cwd=os.getcwd())
     proc_b = None
     try:
@@ -69,7 +78,7 @@ def main() -> int:
 
         print("  再启动第二个实例（同一个端口 → bind 必然失败）")
         log_b = open(SERVER_LOG_B, "wb")
-        proc_b = subprocess.Popen([SERVER], stdout=log_b, stderr=subprocess.STDOUT,
+        proc_b = subprocess.Popen([SERVER,DB_B], stdout=log_b, stderr=subprocess.STDOUT,
                                   cwd=os.getcwd())
 
         # ---- 等它退出 ----

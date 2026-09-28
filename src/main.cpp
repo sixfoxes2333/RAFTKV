@@ -3,6 +3,7 @@
 #include "net/protocol.h"
 #include<sys/socket.h>
 #include<netinet/in.h>
+#include<netinet/tcp.h>
 #include<fcntl.h>
 #include<cerrno>
 #include<iostream>
@@ -140,27 +141,51 @@ void handle_message(Connection *c , const char *payload , size_t len)
 {
     kv::Request req;
 
-    //解析失败
-    if(!kv::parse_request(payload,len,req))
-    {
-        send_error(c);
-        return;
-    }
 
     kv::StorageTask task;
     task.fd = c->fd(); //回信地址
     task.connection_id = c->connection_id(); //连接代数
     task.sequence = ++g_next_sequence; //投递序号
-    task.request = std::move(req);
+    
+    task.bytes = len;
+
+    //解析失败，占位
+    if(!kv::parse_request(payload,len,req))
+    {
+        task.parse_failed = true;
+    }
+    else
+    {
+        task.bytes = req.key.size() + req.value.size();
+        task.request = std::move(req);
+    }
+
+
+    //单连接字节预算
+    if(c->inflight_bytes() + task.bytes > kv::MAX_CONN_QUEUE_BYTES)
+    {
+        send_error(c);
+        c->reactor()->request_close(c);
+        return;
+    }
+
 
     //投递失败
     if(!g_worker->submit(std::move(task)))
     {
+        if(c->pending_requests() > 0)
+        {
+            send_error(c);
+            c->reactor()->request_close(c);
+            return;
+        }
+
         send_error(c);
         return;
     }
 
     c->add_pending_request();
+    c->add_inflight_bytes(task.bytes);
 
 }
 
@@ -327,6 +352,15 @@ void handle_accept(Connection *lc)
 
         // //测试完注释掉
 
+        //关闭 nagle
+        int nodelay = 1;
+        if(setsockopt(connfd,IPPROTO_TCP,TCP_NODELAY,&nodelay,sizeof(nodelay)) < 0)
+        {
+            std::cerr << "setsockopt TCP_NODELAY failed : " << strerror(errno) << std::endl;
+            close(connfd);
+            continue;
+        }
+
         auto c = std::make_unique<Connection>(connfd,lc->reactor());
 
         c->on_read = handle_read;
@@ -362,6 +396,7 @@ void handle_storage_events(Connection* w)
 
         //减掉在途计数 再打包
         c->finish_pending_request();
+        c->release_inflight_bytes(item.bytes); // 新增归还请求占的字节
 
         send_response(c,item.response);
 

@@ -2,6 +2,7 @@
 #include "base/be32.h" //文件头读写用到 append_be32 / read_be32
 #include<cstring>
 #include<fcntl.h>
+#include<sys/file.h>
 #include<unistd.h>
 #include<cerrno>
 #include<iostream>
@@ -188,6 +189,15 @@ namespace kv
         {
             std::cerr << "open " << path << " failed: " << strerror(errno) << std::endl;
             return; //未打开成功 fd_ 仍等于 -1 good() == false
+        }
+
+        //文件独占锁
+        if(flock(fd_,LOCK_EX | LOCK_NB) != 0) //LOCK_NB 拿不到就直接失败
+        {
+            std::cerr << "database is locked : " << path << " ( " << strerror(errno) << " ) " << std::endl;
+            close(fd_);
+            fd_ = -1;
+            return;
         }
 
         //lseek 获取文件大小

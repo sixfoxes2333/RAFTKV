@@ -35,8 +35,10 @@ echo "构建完成"
 
 fail=0
 
+STEP=0   #序号自增：以后插入测试不用再改后面的编号
+
 echo
-echo "== 1/11 存储单元测试（记录/文件头/put/get/del）=="
+echo "== $((++STEP)) 存储单元测试（记录/文件头/put/get/del）=="
 if ./build/test_storage > /tmp/kv_test_storage.log 2>&1; then
     echo "PASS（日志 /tmp/kv_test_storage.log）"
 else
@@ -46,7 +48,7 @@ else
 fi
 
 echo
-echo "== 2/11 存储恢复（keydir 重建 / torn-tail 截断 / CRC 损坏拒绝）=="
+echo "== $((++STEP)) 存储恢复（keydir 重建 / torn-tail 截断 / CRC 损坏拒绝）=="
 if ./build/test_recovery > /tmp/kv_test_recovery.log 2>&1; then
     echo "PASS（日志 /tmp/kv_test_recovery.log）"
 else
@@ -56,7 +58,7 @@ else
 fi
 
 echo
-echo "== 3/11 半关闭回归（小消息）=="
+echo "== $((++STEP)) 半关闭回归（小消息）=="
 if python3 tests/net_halfclose_test.py; then
     :
 else
@@ -64,7 +66,7 @@ else
 fi
 
 echo
-echo "== 4/11 半关闭 + 大回复围栏（先发完再关 + 不空转）=="
+echo "== $((++STEP)) 半关闭 + 大回复围栏（先发完再关 + 不空转）=="
 if python3 tests/net_halfclose_flush_test.py; then
     :
 else
@@ -72,7 +74,7 @@ else
 fi
 
 echo
-echo "== 5/11 背压回归 =="
+echo "== $((++STEP)) 背压回归 =="
 if python3 tests/net_backpressure_test.py; then
     :
 else
@@ -80,7 +82,7 @@ else
 fi
 
 echo
-echo "== 6/11 发送队列水位线（硬上限 / 暂停读后恢复 / 内存有界）=="
+echo "== $((++STEP)) 发送队列水位线（硬上限 / 暂停读后恢复 / 内存有界）=="
 if python3 tests/net_outqueue_test.py; then
     :
 else
@@ -88,7 +90,7 @@ else
 fi
 
 echo
-echo "== 7/11 fd 用尽（EMFILE）不许空转 =="
+echo "== $((++STEP)) fd 用尽（EMFILE）不许空转 =="
 if python3 tests/net_emfile_test.py; then
     :
 else
@@ -96,7 +98,7 @@ else
 fi
 
 echo
-echo "== 8/11 启动失败必须响亮地退出（端口被占）=="
+echo "== $((++STEP)) 启动失败必须响亮地退出（端口被占）=="
 if python3 tests/net_startup_fail_test.py; then
     :
 else
@@ -104,7 +106,7 @@ else
 fi
 
 echo
-echo "== 9/11 单节点 KV 端到端（协议 / 流水线 / 大 value / 并发 / kill -9 重启）=="
+echo "== $((++STEP)) 单节点 KV 端到端（协议 / 流水线 / 大 value / 并发 / kill -9 重启）=="
 if python3 tests/kv_protocol_test.py; then
     :
 else
@@ -112,7 +114,7 @@ else
 fi
 
 echo
-echo "== 10/11 kvclient 命令行（退出码 / 二进制 value / 与 Python 客户端互通）=="
+echo "== $((++STEP)) kvclient 命令行（退出码 / 二进制 value / 与 Python 客户端互通）=="
 if python3 tests/kv_client_test.py; then
     :
 else
@@ -120,7 +122,47 @@ else
 fi
 
 echo
-echo "== 11/11 拷贝/移动契约（编译期 static_assert）=="
+echo "== $((++STEP)) 流水线围栏（服务端必须关 Nagle：depth=16 要显著快于 depth=1）=="
+if python3 tests/net_nodelay_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 数据文件锁（第二个实例不许动正在用的库）=="
+if python3 tests/db_lock_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 回复顺序（第 i 个回复必须对应第 i 个请求；过载要显式拒绝）=="
+if python3 tests/reply_order_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo
+echo "== $((++STEP)) 队列字节预算（大 value 不许把内存打爆；过载必须显式拒绝）=="
+if python3 tests/queue_bytes_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 暂停读（背压要真的挡住客户端；连接不许被上限杀掉）=="
+if python3 tests/net_pause_read_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :
 else

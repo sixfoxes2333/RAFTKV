@@ -16,11 +16,7 @@ void Connection::enable_write()
 
     events_ |= EPOLLOUT;
 
-    if(!reactor_->mod_event(fd_,this,events_))
-    {
-        reactor_->request_close(this);
-    }
-
+    apply_events();
 }
 
 void Connection::disable_write()
@@ -33,10 +29,7 @@ void Connection::disable_write()
 
     events_ &= ~EPOLLOUT;
 
-    if(!reactor_->mod_event(fd_,this,events_))
-    {
-        reactor_->request_close(this);
-    }
+    apply_events();
 
 }
 
@@ -44,6 +37,11 @@ void Connection::close_read()
 {
     events_ &= ~(EPOLLIN | EPOLLRDHUP);
     
+    apply_events();
+}
+
+void Connection::apply_events()
+{
     if(!reactor_->mod_event(fd_,this,events_))
     {
         reactor_->request_close(this);
