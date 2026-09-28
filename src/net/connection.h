@@ -6,6 +6,7 @@
 #include<unistd.h>
 #include<cstdint>
 #include<sys/epoll.h>
+#include<chrono>
 
 //前置声明
 class Connection;
@@ -175,6 +176,25 @@ public:
         return read_paused_;
     }
 
+    //收包缓冲区里是否还剩发了一半的帧
+    bool has_partial_frame()const
+    {
+        return in_.readable() > 0;
+    }
+
+    //记录最近一次收到新字节的时刻，判断半帧是否卡住
+    void touch_read_progress()
+    {
+        last_progress_ = std::chrono::steady_clock::now();
+    }
+
+    std::chrono::steady_clock::time_point last_progress()const
+    {
+        return last_progress_;
+    }
+
+
+
 
 private:
     int fd_;
@@ -195,6 +215,8 @@ private:
     void apply_events();
 
     size_t inflight_bytes_ = 0;
+
+    std::chrono::steady_clock::time_point last_progress_ = std::chrono::steady_clock::now();
 
 };
 

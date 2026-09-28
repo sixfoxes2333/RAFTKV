@@ -3,8 +3,9 @@
 一个从零手写的持久化键值存储服务：epoll 事件循环 + 后台存储线程 + 二进制协议 + Bitcask 风格日志存储。
 支持 `SET` / `GET` / `DEL`，每条写都 `fsync`，进程被 `kill -9` 后重启数据仍在。
 
-> 当前状态：**单节点持久化 KV 已完成**（tag `storage-v1`）。
-> 下一步计划是在它之上实现 Raft，做成 3 副本的 RaftKV。
+> 当前状态：**单节点持久化 KV 已完成**（tag `storage-v1`），并做过一轮系统性的 review 修复
+> （阻塞项 4 条 + 重要项若干，22 项回归 + ASan/UBSan + TSan 全绿，见 §3/§4）。
+> 下一步：**group commit**（写入提速）→ 然后在其上实现 Raft，做成 3 副本的 RaftKV。
 
 ```bash
 ./build/kvserver /tmp/db.data &          # 启动（默认 ./kvdb.data）
@@ -106,18 +107,29 @@ Reactor 线程只做协议解析和投递，`Storage` 只被 worker 线程访问
 ```
 
 **代价也必须说清楚**：单 worker 意味着存储操作串行。同一个实验里，另一个连接的 `GET`
-要排在慢 `SET` 后面，实测 **658ms**。压测同样能看到：`SET` 吞吐在 1→64 连接之间恒为 ~215 ops/s。
+要排在慢 `SET` 后面，实测 **658ms**。压测同样能看到：`SET` 吞吐与并发/流水线**无关** ——
+闭环 C=1 是 179 ops/s，流水线 p=16 C=8 也只有 171 ops/s，而 P50 从 4.6ms 涨到 543ms（见 §3.1）。
 
-### 2.5 发送队列有上限（三层防护）
+### 2.5 所有"会增长的东西"都有上限（内存 / 连接 / 时间）
 
-对端不读时 `out_` 曾经无界增长（可被单连接打到 OOM）。现在：
+对端**不读、发一半、猛灌**都不能把服务器拖垮。现在的上限（都有围栏测试）：
 
-1. **高水位 2MB**：暂停读（`EPOLLIN` 摘掉）→ 压力转成 TCP 背压；
-2. **低水位 512KB**：恢复读（迟滞，避免在阈值附近反复开关）；
-3. **硬上限 17MB**：连"已接收请求"产生的回复都堆爆时，放弃这条连接（必须 > 单条消息最大值 16MB）。
+| 位置 | 上限 | 超限行为 | 围栏 |
+|---|---|---|---|
+| 发送队列 `out_` | 高水位 2MB 暂停读；低水位 512KB 恢复（迟滞）；硬上限 17MB | 高水位 → 真的摘掉内核 `EPOLLIN`（转成 TCP 背压）；硬上限 → 关连接 | `net_outqueue` / `net_pause_read` |
+| 后台任务队列 | **1024 条** 且 全局 **64MB** / 单连接 **32MB**（请求体字节） | 明确回 `Error`；该连接还有在途请求时同时关连接 | `reply_order` / `queue_bytes` |
+| 收包缓冲 `in_` | 单连接天然 ≤ 4+`MAX_MESSAGE` ≈ 16MB；**全局 128MB** | 关掉正在长大的那条连接 | `in_buffer_budget` |
+| 半条帧 | **30s 无进展**（`KV_FRAME_TIMEOUT_MS`） | 关连接（slow-loris 防护） | `net_frame_timeout` |
+| 单条消息 | `MAX_MESSAGE` 16MB | 协议错误 → 关连接 | `kv_protocol_test` |
 
-实测：40 条 2MB 回复且客户端不读 → 服务器在 17MB 处 `send queue overflow`、连接关闭、
-进程存活、峰值 `VmHWM` **32MB**（若无限排队则是 80MB+）。
+实测：正常压测下服务器 `VmHWM` **3.6MB**；
+20 条连接各发 14MB "半条帧"（合计 280MB）时，全局收包预算逐条关连接、进程存活、`VmHWM` 139.9MB（外部限制 192MB）。
+
+三个细节值得记：
+
+- **条数和字节两条上限都要**：条数兜"任务结构体本身"的开销（几字节的请求也占约 100 字节结构体），字节兜请求体；
+- **字节记账要含"正在执行"的那条**：worker 手里那条仍占内存，只有完成结果被 Reactor 取走才算离开队列（否则账会一直涨、最后假满）；
+- **单连接上限必须 > 单条最大消息**：否则最大消息永远排不进队列（这是"防护"和"功能"的边界）。
 
 ### 2.6 异步结果的配对：`connection_id`
 
@@ -136,78 +148,136 @@ peer_closed && out_ 为空 && pending_requests == 0
 
 （这条 bug 被 `net_halfclose_flush_test.py` 逮到，而它的注释在四天前就预言了这个场景。）
 
+### 2.8 回复顺序 = 请求顺序（异步化之后必须显式保证）
+
+协议里没有请求 id，客户端**只能按顺序**把回复和请求配对 —— 所以顺序就是语义。
+把存储搬到后台线程之后，服务端就有了两条回包路径：正常请求走完成队列（晚），
+解析失败当场回 `Error`（早）—— 于是流水线下错误回复会插队，客户端会把 `Error` 记到
+一条其实写成功了的请求上，而且**无法察觉**。
+
+修法（方案 A）：解析失败也投一个"合成任务"占位，让它的错误回复和正常回复走**同一条**完成队列。
+顺带定下过载语义：只有"这条连接还有在途请求"（顺序真的会被破坏）时才回 `Error` 并关连接；
+全新连接只回 `Error`、连接保留（否则过载时会把所有客户端一起杀掉）。
+
+### 2.9 两个"不许静默"的例子
+
+- **打开即加锁**：`recover()` 会 `ftruncate` 残尾，是**有副作用**的恢复，它的正确性依赖"我是这个库唯一的所有者"。
+  第二个实例带着同样逻辑进场，会把"正在被写的那条记录"当成崩溃残尾剪掉（实测：数据静默消失）。
+  所以 `Storage` 在 `open` 之后、`recover` 之前 `flock(LOCK_EX|LOCK_NB)`，拿不到就拒绝启动。
+- **注册失败要响亮**：`epoll_ctl(ADD)` 失败曾经只打印一行就 `return`，调用者完全不知道 ——
+  后果是进程挂在 `epoll_wait` 里**活着但不服务**（实测：监听 fd 失败时端口都没了；
+  worker 的 eventfd 失败时端口还能连、但永远不回包）。现在注册失败就是非 0 退出。
+
 ---
 
 ## 3. 实测数据
 
-环境：WSL2 / Linux，64 字节 value，客户端为多进程（避免 Python GIL 污染测量，
-第一版用线程时 GET 在 C=16 从 20k 掉到 4k，实际是客户端瓶颈）。
-复现：`python3 tests/bench.py 3`
+环境：WSL2 / Linux，64 字节 value，键空间 1000，客户端为 **C++ 压测客户端 `tests/kvbench`**
+（每线程一条连接、请求模板预热时预编码、**逐请求真实延迟**（发送时刻入队、FIFO 配对）、
+样本合并后再算分位数，并报告客户端 CPU 以确认客户端不是瓶颈）。服务端 `TCP_NODELAY` 已开。
 
-**SET（每条都 fsync，单 worker 串行）**
+```bash
+cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
+./build/kvbench --op set --conns 1 --pipeline 1 --keyspace 1000 --value-size 64 --duration 5   # 先预置键空间
+./build/kvbench --op get --conns 8 --pipeline 16 --keyspace 1000 --duration 3
+```
 
-| 连接数 | QPS | 平均 | P50 | P99 |
-|---:|---:|---:|---:|---:|
-| 1 | 215.1 | 4.64ms | 4.60ms | 5.63ms |
-| 4 | 221.1 | 18.03ms | 18.27ms | 19.38ms |
-| 16 | 221.7 | 71.29ms | 72.10ms | 77.42ms |
-| 64 | 218.4 | 279.61ms | 291.01ms | 307.22ms |
+### 3.1 写入：吞吐被 `fsync` 钉死，开流水线只增加排队
 
-→ 吞吐恒为 ~215 ops/s（= 1 / fsync 延迟 4.65ms），延迟随并发线性增长 = 纯排队。
-**这就是下一步做 group commit 的直接理由。**
+| 口径 | QPS | 平均 | P50 | P90 | P99 |
+|---|---:|---:|---:|---:|---:|
+| SET 闭环 C=1 | 179.2 | 4.65ms | 4.60ms | 4.66ms | 5.61ms |
+| SET 流水线 p=16 C=1 | 183.6 | 38.4ms | **38.3ms** | 67.7ms | 74.2ms |
+| SET 流水线 p=16 C=8 | 170.5 | 543ms | **543ms** | 573ms | 582ms |
 
-**GET（不落盘；走同一条串行路径读页缓存）**
+→ 吞吐恒为 **~180 ops/s = 1 / fsync 延迟(4.6ms)**，与并发、流水线深度**无关**；
+开流水线的唯一效果是把"等待"变成"排队"（P50 4.6ms → 38ms → 543ms）。
+**这就是做完单节点之后立刻要做 group commit 的理由：一次 fsync 提交多条，是唯一的提速路径。**
 
-| 连接数 | QPS | 平均 | P50 | P99 |
-|---:|---:|---:|---:|---:|
-| 1 | 6845.4 | 0.14ms | 0.14ms | 0.23ms |
-| 4 | 24241.5 | 0.16ms | 0.16ms | 0.27ms |
-| 16 | 34944.4 | 0.46ms | 0.44ms | 0.66ms |
-| 64 | 37964.5 | 1.67ms | 1.62ms | 2.11ms |
+### 3.2 读取：流水线才是重点（旧口径"~38k 上限"是闭环假象）
 
-→ 单 worker 的上限约 **38k ops/s**（≈26µs/请求的线程往返）。再往上需要多 worker
-或让读旁路 worker（`pread` 无副作用，多线程读同一 fd 是安全的）。
+| 口径 | QPS | P50 | P99 |
+|---|---:|---:|---:|
+| GET 闭环 C=1 | 5 602 | 127µs | 184µs |
+| GET 闭环 C=4 | 20 159 | 147µs | 224µs |
+| GET 闭环 C=8 | 24 827 | 232µs | 345µs |
+| GET 闭环 C=16 | 26 182 | 441µs | 648µs |
+| GET 闭环 C=64 | 28 482 | 1 628µs | 2 143µs |
+| **GET 流水线 p=16 C=1** | **51 343** | 120µs | 238µs |
+| **GET 流水线 p=16 C=8** | **84 968** | 1 000µs | 1 502µs |
 
-**混合 80/20（C=16）**：1082.8 ops/s，P50 13.89ms。
-→ 20% 写决定总吞吐：215 / 0.2 ≈ 1075，实测吻合。
+→ 同并发对比：C=1 **5.6k → 51.3k（9.2×）**；C=8 **24.8k → 85.0k（3.4×）**。
+闭环客户端量到的是 RTT 而不是服务器能力 —— 所以"单 worker 上限 38k"是假象，
+真正的上限要开流水线才量得出来（这台机器上 ≈85k ops/s，之后需要多 Reactor 或读旁路）。
 
-**其他已验证行为**
+（历史：缺 `TCP_NODELAY` 时，同一口径 p=16 C=1 只有约 300 ops/s —— Nagle 与延迟 ACK 把
+小回复攒住 40ms。加一行 `setsockopt(TCP_NODELAY)` 之后是 51 343。围栏 `net_nodelay_test.py`
+要求"流水线吞吐 ≥ 2× 闭环"，实测比值 8.9。）
+
+### 3.3 混合与其他
+
+| 口径 | 结果 |
+|---|---|
+| MIX 流水线 p=16 C=8（20% 写） | 874.2 QPS，P50 1.51ms，P99 505ms（读快、写把尾巴拖长） |
+| 服务器 VmHWM（压测中） | 3.6MB |
+| 客户端 CPU（p=16 C=8） | 3s 墙钟内 4.3s CPU ≈ 1.4 核（客户端不是瓶颈） |
+
+### 3.4 其他已验证行为
 
 | 项目 | 结果 |
 |---|---|
-| 背压 | 客户端 `SO_RCVBUF=4096` 时 8MB 回复完整送达（3.05s，中途无 EOF） |
-| 队列水位 | 17MB 硬上限生效，峰值 VmHWM 32.3MB |
+| 背压/暂停读 | 客户端被 TCP 流控挡住（连续 EAGAIN）、连接存活；客户端读走数据后恢复 |
+| 回复顺序 | 第 i 个回复严格对应第 i 个请求；过载只回 1 个 `Error` 后关连接 |
+| 数据文件锁 | 第二个实例拒绝打开、不动文件；`kill -9` 后锁自动释放、恢复流程正常 |
+| 队列字节预算 | `RLIMIT_AS=192MiB` + 29 笔 4MiB 写：不再 `bad_alloc`；峰值 VmHWM 44MB、明确 `Error` |
+| 收包缓冲预算 | 20×14MB 半条帧：进程存活、VmHWM 139.9MB（限制 192MB）、11/20 连接被关 |
+| 半条帧超时 | 卡住的连接 1s 内被关；4MB 分块发 4s（每块间隔 100ms）的请求不被误杀 |
+| epoll 注册失败 | 退出码 1 + 日志明确（不再"活着但不服务"） |
+| 客户端帧长 | 假服务器声明 4GB/16MB+1：客户端 0.00s 退出、码 2（不再挂死/崩溃） |
 | fd 耗尽 | `RLIMIT_NOFILE=32` 后观察窗口 CPU 0.00–0.14s（不空转） |
-| 启动失败 | 端口被占 → 退出码 1（且数据库未就绪前不 listen） |
 | 崩溃注入 | 27/27：`kill -9` 可恢复、残尾可截断、位翻转 fail closed |
 | 故障注入 | 6/6：fsync 失败 → poisoned；写失败+回滚成功 → 普通失败；回滚失败 → poisoned |
 | 端到端 | `kill -9` 后重启数据仍在；已删除的 key 仍为 `NotFound`；重启后的写入同样持久化 |
-| 并发 | 8 连接 × 各 100 轮 SET+GET 无错（1600 次操作 3.63s，含 fsync） |
+| Sanitizer | ASan/UBSan **PASS**；TSan **5/5 无数据竞争**（Reactor 线程 ⇄ worker 线程） |
 
 ---
 
 ## 4. 测试与工具
 
 ```bash
-bash tests/run_all.sh            # 11 项快速回归（约 40s）
+bash tests/run_all.sh            # 22 项快速回归
 bash tests/run_all.sh --slow     # 追加：崩溃注入 + 故障注入 + 慢 fsync 注入
 bash tests/run_all.sh --asan     # 追加：ASan/UBSan（服务器 + 端到端场景）
-bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端（Reactor ⇄ worker）
-python3 tests/bench.py 3         # 压测
+bash tests/run_asan.sh           # ASan/UBSan（存储单测 + 背压 + 端到端，检查 sanitizer 输出）
+bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
+./build/kvbench --help           # 压测客户端（见 3.1/3.2 的口径）
 ```
 
 | 文件 | 作用 |
 |---|---|
-| `tests/test_storage.cpp` / `test_recovery.cpp` | 存储单元与恢复（含格式 v2 的黄金值） |
+| `tests/test_storage.cpp` / `test_recovery.cpp` | 存储单元与恢复（含格式 v2 黄金值 / 残尾截断 / 损坏拒绝） |
 | `tests/test_protocol.cpp` | 协议编解码（黄金字节串 + 往返 + 非法输入） |
 | `tests/test_storage_worker.cpp` | 后台线程：FIFO、身份透传、eventfd 清空、析构 drain、跨重启 |
-| `tests/kvproto.py` | 协议的 Python 实现（测试共用） |
-| `tests/kv_protocol_test.py` | 端到端：语义 / 流水线 / 1MB / 协议错误 / 并发 / kill -9 重启 |
-| `tests/kv_client_test.py` | kvclient CLI 契约（退出码、二进制 value、与 Python 客户端互通） |
-| `tests/net_*_test.py` | 网络层：背压 / 半关闭 / 半关闭+大回复 / EMFILE / 启动失败 / 队列水位 |
-| `tests/crash_inject_test.py` `crash_writer.cpp` | 崩溃注入（kill -9 / 截断 / 位翻转） |
-| `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync 失败、慢 fsync） |
-| `tests/bench.py` | 压测（SET / GET / 混合，并发扫描，QPS + P50/P99） |
+| `tests/kvproto.py` | 协议的 Python 实现（测试共用）；`start_server` 会**验证自己启动的进程**并做协议握手 |
+| `tests/kvbench.cpp` | C++ 压测客户端（逐请求真实延迟、合并样本算分位数、报告客户端 CPU） |
+| `tests/kv_protocol_test.py` | 端到端：语义 / 流水线 / 1MB / 协议错误 / 并发 / `kill -9` 重启 |
+| `tests/kv_client_test.py` `kvclient_fake_server_test.py` `kvclient_limits_test.py` | CLI 契约：退出码、二进制 value、巨大帧长、字段超限 |
+| `tests/net_nodelay_test.py` | 流水线围栏：depth=16 必须显著快于 depth=1 |
+| `tests/net_pause_read_test.py` | 背压：客户端必须被流控挡住、连接不许被上限杀掉 |
+| `tests/net_outqueue_test.py` | 发送队列：硬上限 + 水位恢复 + 内存有界 |
+| `tests/db_lock_test.py` | 数据文件互斥：第二个实例不许动正在用的库 |
+| `tests/reply_order_test.py` | 回复顺序 + 过载语义 |
+| `tests/queue_bytes_test.py` `in_buffer_budget_test.py` `net_frame_timeout_test.py` | 三条内存/时间上限（后台队列字节、收包全局字节、半条帧超时） |
+| `tests/net_epoll_add_fail_test.py` `startup_probe_test.py` | 注册失败要响亮退出；脚手架自身的启动探测 |
+| `tests/net_*_test.py`（半关闭 / EMFILE / 启动失败） | 网络层边界 |
+| `tests/crash_inject_test.py` `crash_writer.cpp` | 崩溃注入（`kill -9` / 截断 / 位翻转） |
+| `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync/epoll_ctl 失败、慢 fsync） |
+
+两个测试工程上的约定：
+
+- **每个修复都配一条"红过的"围栏**（先确认它在修复前失败，再修到绿）；
+- **测试脚手架本身也要围栏**：`startup_probe_test.py` 专门验证"假二进制 / 端口被占 / 协议不符"
+  不会被误判成启动成功 —— 否则网络测试可能全跑在"不是我们的服务器"上。
 
 ---
 
@@ -215,11 +285,18 @@ python3 tests/bench.py 3         # 压测
 
 1. **数据集受内存限制**：keydir 全量常驻内存（1M 小 key ≈ 100MB 量级，估算值，未实测）。
 2. **日志不回收**：追加日志只增不减，尚未实现 compaction（需要合并 + hint 文件重建索引）。
-3. **写吞吐被串行 fsync 卡住**：~215 ops/s（本机 fsync 4.65ms）；改进方向是 group commit。
-4. **读也被单 worker 串行**：GET 上限 ~38k ops/s；改进方向是多 worker 或读旁路。
+3. **写吞吐 = 1/fsync ≈ 180 ops/s**：与并发/流水线无关（见 3.1）。改进方向是 group commit
+   （合并一次 fsync 提交多条）；在那之前，加深流水线只会让 P50 从 4.6ms 涨到 543ms。
+4. **读上限 ≈ 85k ops/s（p=16 C=8）**：单 Reactor 串行处理所有连接；再往上需要多 Reactor
+   （`SO_REUSEPORT`）或让读旁路 worker（`pread` 无副作用，多线程读同一 fd 安全）。
 5. **单点**：没有副本、没有故障转移（Raft 是下一步）。
 6. **无认证/无 TLS**：仅适用于可信内网。
 7. **`MAX_MESSAGE` 16MB**：单条消息上限，超过则视为协议错误并关闭连接。
+8. **收包预算是"总量"而不是"公平分配"**：128MB 被半条帧吃满时，被关掉的是"正在长大的那条连接"，
+   可能包含合法但很慢的客户端；半条帧超时（30s）负责把这种占用限制在时间上。
+9. **半条帧超时粒度 1s**：靠 `epoll_wait` 的 1s 周期扫描实现，所以 800ms 的超时会在大约 1s 内生效。
+10. **每次 SET 都 fsync**（`sync_on_put_ = true`）：没有 `everysec` 之类的模式；group commit 会带来
+   `always` / `everysec` / `off` 三种模式（Raft 日志用 always，状态机用 everysec）。
 
 ---
 
@@ -239,8 +316,9 @@ CMakeLists.txt
 
 ## 7. 后续计划
 
-1. **Raft**：leader 选举、日志复制、持久化 `currentTerm/votedFor/log`、apply 到本存储。
-2. 可靠性验证：网络分区/丢包/重排、客户端请求去重、线性一致性检查。
-3. 快照与日志压缩；ReadIndex / Lease Read 优化只读。
-4. group commit（合并 fsync）与多 worker（提高写/读上限）。
-5. 存储引擎接口化 + compaction，必要时对比 LSM 后端。
+1. **group commit**：三种模式共享一个 batcher（`always` / `everysec` / `off`），
+   把写入从 ~180 ops/s 提到万级，同时保持 `kill -9` 数据仍在（页缓存）。
+2. **Raft**：leader 选举、日志复制、持久化 `currentTerm/votedFor/log`、apply 到本存储。
+3. 可靠性验证：网络分区/丢包/重排、客户端请求去重、线性一致性检查。
+4. 快照与日志压缩；ReadIndex / Lease Read 优化只读。
+5. 多 Reactor（提高读上限）与存储引擎接口化 + compaction，必要时对比 LSM 后端。

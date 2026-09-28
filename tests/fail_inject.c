@@ -12,6 +12,8 @@
  *   KV_FAIL_WRITE_CALL=N      第 N 次 write()（1-based，只计对 fd>2 的调用）返回 -1/ENOSPC
  *   KV_FAIL_FTRUNCATE_CALL=N  第 N 次 ftruncate() 返回 -1/EIO
  *   KV_FAIL_FSYNC_CALL=N      第 N 次 fsync() 返回 -1/EIO
+ *   KV_FAIL_EPOLL_ADD=N      第 N 次 epoll_ctl(EPOLL_CTL_ADD) 返回 -1/ENOMEM
+ *                             （用来验证"注册失败必须响亮退出"：服务器不许活着但不服务）
  *   KV_DELAY_FSYNC_MS=N       每次 fsync() 之前先睡 N 毫秒（模拟慢磁盘），不影响返回值
  *   不设置或设为 0 表示该注入关闭。
  *
@@ -24,6 +26,7 @@
  *
  * 【用法】
  *   LD_PRELOAD=/tmp/kv_fail_inject.so KV_FAIL_FSYNC_CALL=3 ./build/crash_writer poison /tmp/x.log 3
+ *   LD_PRELOAD=/tmp/kv_fail_inject.so KV_FAIL_EPOLL_ADD=1 ./build/kvserver /tmp/x.db
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -31,6 +34,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/epoll.h>
 
 static int env_int(const char *name)
 {
@@ -48,6 +52,7 @@ static int env_int(const char *name)
 static int g_write_calls = 0;
 static int g_ftruncate_calls = 0;
 static int g_fsync_calls = 0;
+static int g_epoll_add_calls = 0;
 
 ssize_t write(int fd,const void *buf,size_t count)
 {
@@ -125,4 +130,32 @@ int fsync(int fd)
     }
 
     return real_fsync(fd);
+}
+
+
+/* KV_FAIL_EPOLL_ADD=N：第 N 次 epoll_ctl(EPOLL_CTL_ADD) 返回 -1/ENOMEM。
+   注入的是【ADD】那一次注册，不是 epoll_wait。
+   启动阶段的 ADD 顺序：第 1 次 = 监听 fd；第 2 次 = worker 的 eventfd。 */
+int epoll_ctl(int epfd,int op,int fd,struct epoll_event *event)
+{
+    static int (*real_epoll_ctl)(int,int,int,struct epoll_event*) = NULL;
+
+    if(real_epoll_ctl == NULL)
+    {
+        real_epoll_ctl = (int (*)(int,int,int,struct epoll_event*))dlsym(RTLD_NEXT,"epoll_ctl");
+    }
+
+    if(op == EPOLL_CTL_ADD)
+    {
+        int fail_at = env_int("KV_FAIL_EPOLL_ADD");
+        g_epoll_add_calls++;
+
+        if(fail_at > 0 && g_epoll_add_calls == fail_at)
+        {
+            errno = ENOMEM;      /* epoll watch 上限用尽时就是这个错误 */
+            return -1;
+        }
+    }
+
+    return real_epoll_ctl(epfd,op,fd,event);
 }

@@ -28,6 +28,11 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
+#每轮开始清一次测试日志：
+#  start_server 现在是【追加】写日志（同一次运行里多个实例的输出都保留），
+#  所以跨轮次必须清掉旧的，否则日志断言会匹配到上一轮的残留。
+rm -f /tmp/kv_*.log
+
 echo "== 构建 =="
 cmake -B build > /dev/null || exit 2
 cmake --build build -j > /dev/null 2>&1 || { echo "构建失败"; exit 2; }
@@ -157,6 +162,54 @@ fi
 echo
 echo "== $((++STEP)) 暂停读（背压要真的挡住客户端；连接不许被上限杀掉）=="
 if python3 tests/net_pause_read_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) epoll 注册失败（必须响亮退出，不许活着但不服务）=="
+if python3 tests/net_epoll_add_fail_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 客户端帧长校验（假服务器声明巨大长度：不许崩、不许挂）=="
+if python3 tests/kvclient_fake_server_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 客户端字段上限（超长 key 本地就该拒绝）=="
+if python3 tests/kvclient_limits_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 收包缓冲全局预算（半条帧不许把内存打爆）=="
+if python3 tests/in_buffer_budget_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 半条帧超时（卡住不回进展的连接要断开；慢但有序的不许误杀）=="
+if python3 tests/net_frame_timeout_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 启动探测（脚手架自己：假二进制/端口被占/协议不符都要报错）=="
+if python3 tests/startup_probe_test.py; then
     :
 else
     fail=$((fail + 1))

@@ -1,4 +1,5 @@
 #include "net/reactor.h"
+#include<chrono>
 
 Reactor::Reactor():epfd_(-1) //构造对象时将 epfd_ 初始化为 -1
 {
@@ -17,7 +18,7 @@ bool Reactor::loop()
     while(running_)
     {
         //epoll_wait 返回准备好进行 I/O 操作 fd 的数量
-        int n = epoll_wait(epfd_,events,1024,-1);
+        int n = epoll_wait(epfd_,events,1024,1000);
 
         if(n < 0)
         {
@@ -57,6 +58,8 @@ bool Reactor::loop()
                 c->on_write(c);
             }
         }
+
+        sweep_partial_frames();
 
         drain_pending_close();
 
@@ -98,7 +101,7 @@ bool Reactor::mod_event(int fd,Connection *conn,uint32_t events)
 }
 
 
-void Reactor::add_connection(int fd,std::unique_ptr<Connection>conn,u_int32_t events)
+bool Reactor::add_connection(int fd,std::unique_ptr<Connection>conn,u_int32_t events)
 {
 
     conn->set_connection_id(next_conn_id_++);//分配连接代数
@@ -106,10 +109,11 @@ void Reactor::add_connection(int fd,std::unique_ptr<Connection>conn,u_int32_t ev
     conn->set_events(events); // Connection 的记录与注册值保持一致
     if(!add_event(fd,conn.get(),events)) //注册
     {
-        return;
+        return false;
     }
 
     connections_[fd] = std::move(conn); //所有权进入 map
+    return true;
 }
 
 void Reactor::request_close(Connection* c)
@@ -127,8 +131,16 @@ void Reactor::drain_pending_close()
 {
     for(int fd : pending_close_)
     {
-        //fd 关闭时内核自动将其从 epoll 去掉 不再需要 EPOLL_CTL_DEL
-        connections_.erase(fd);
+
+        auto it = connections_.find(fd);
+
+        if(it != connections_.end())
+        {
+            release_in_bytes(it->second->in_.readable());
+
+            //fd 关闭时内核自动将其从 epoll 去掉 不再需要 EPOLL_CTL_DEL
+            connections_.erase(fd);
+        }
     }
 
     pending_close_.clear();
@@ -155,4 +167,33 @@ Connection* Reactor::find_connection(int fd,uint64_t connection_id)
 void Reactor::stop()
 {
     running_ = false;
+}
+
+void Reactor::sweep_partial_frames()
+{
+    if(frame_timeout_ms_ <= 0)
+    {
+        return;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+
+    for(auto &kv : connections_)
+    {
+        Connection* c = kv.second.get();
+
+        if(c->closing() || !c->has_partial_frame())
+        {
+            continue;
+        }
+
+        long long idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - c->last_progress()).count();
+
+        if(idle_ms > frame_timeout_ms_)
+        {
+            std::cerr << "partial frame idle " << idle_ms << "ms,close fd  = " << c->fd() << std::endl;
+            request_close(c);
+        }
+    }
+
 }

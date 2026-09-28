@@ -17,6 +17,9 @@ namespace kv
     
     // 一条连接不能独占全局的预算
     inline constexpr size_t MAX_CONN_QUEUE_BYTES = 32*1024*1024; //32MB
+
+    inline constexpr size_t MAX_IN_BUFFER_BYTES = 128*1024*1024; //128MB
+
 }
 
 #endif

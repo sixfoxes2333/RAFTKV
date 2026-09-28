@@ -29,6 +29,9 @@ export UBSAN_OPTIONS="print_stacktrace=1"
 
 SAN_PATTERN="AddressSanitizer|runtime error|LeakSanitizer"
 
+#每轮开始清一次日志（start_server 现在追加写日志，跨轮次必须清旧的）
+rm -f /tmp/kv_*.log
+
 echo "[ASan] 仓库: $REPO"
 echo "[ASan] 构建目录: $BUILD（在仓库外，不进 git）"
 

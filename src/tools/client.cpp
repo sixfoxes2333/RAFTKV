@@ -1,4 +1,5 @@
 #include "net/protocol.h"
+#include "base/limits.h"
 #include<cstdint>
 #include<sys/socket.h>
 #include<iostream>
@@ -77,6 +78,14 @@ bool recv_frame(int fd,std::string &payload)
     uint32_t len;
     memcpy(&len,header,4);
     len = ntohl(len); //大端转换为主机序
+
+    if(len > kv::MAX_MESSAGE)
+    {
+        std::cerr << "frame too large : " << len << " > " << kv::MAX_MESSAGE << std::endl;
+        return false;
+    }
+
+
     payload.resize(len);
 
 
@@ -146,6 +155,14 @@ int main(int argc,char *argv[])
         std::cerr << "unknow command : " << cmd << std::endl;
         return 2;
     }
+
+
+    if(req.key.size() > kv::MAX_KEY || req.value.size() > kv::MAX_VALUE)
+    {
+        std::cerr << "key/value too large : key = " << req.key.size() << " (max " << kv::MAX_KEY << " ) ,value = " << req.value.size() << " (max " << kv::MAX_VALUE << " ) " << std::endl;
+        return 2; 
+    }
+
 
     //连接参数 : 默认回环 + 9006
     int port = 9006;

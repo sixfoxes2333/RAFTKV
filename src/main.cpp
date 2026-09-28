@@ -10,6 +10,7 @@
 #include<cstring>
 #include<arpa/inet.h>
 #include<memory>
+#include<cstdlib>
 
 int g_idle_fd = -1;//预留占位 fd
 
@@ -241,10 +242,23 @@ void handle_read(Connection* c)
         ssize_t len = read(c->fd(),buf,sizeof(buf));
         if(len > 0)
         {
+            if(c->reactor()->in_bytes() + static_cast<size_t>(len) > kv::MAX_IN_BUFFER_BYTES)
+            {
+                std::cerr << "in buffer budget exceeded (" << c->reactor()->in_bytes() << " + " << len << " > " << kv::MAX_IN_BUFFER_BYTES << "),close fd = " << c->fd() << std::endl;
+                c->reactor()->request_close(c);
+                return;
+            }
+
             c->in_.append(buf,len);
+            c->reactor()->add_in_bytes(static_cast<size_t>(len));
+            c->touch_read_progress();
+
+            size_t before = c->in_.readable();
 
             //检测切分
             process_frames(c);
+
+            c->reactor()->release_in_bytes(before - c->in_.readable());
             
             if(c->closing())
             {
@@ -366,7 +380,11 @@ void handle_accept(Connection *lc)
         c->on_read = handle_read;
         c->on_write = handle_write;
 
-        lc->reactor()->add_connection(connfd,std::move(c),CONN_BASE_EVENTS);
+        if(!lc->reactor()->add_connection(connfd,std::move(c),CONN_BASE_EVENTS))
+        {
+            std::cerr << "register connection fdd = " << connfd << "failed,drop it" << std::endl;
+            continue;
+        }
         
         std::cout << "\n new conn fd = " << connfd << " from " << inet_ntoa(client.sin_addr) << ":" << ntohs(client.sin_port) << " \n" << std::endl;
     }
@@ -487,12 +505,26 @@ int main(int argc,char* argv[])
 
     Reactor reactor;
 
+    int frame_timeout_ms = 30000;
+
+    if(const char* p = getenv("KV_FRAME_TIMEOUT_MS"))
+    {
+        frame_timeout_ms = atoi(p);
+    }
+
+    reactor.set_frame_timeout_ms(frame_timeout_ms);
+
+
     auto lc = std::make_unique<Connection>(listenfd,&reactor);
 
     lc->on_read = handle_accept;
     lc->on_write = nullptr;
     
-    reactor.add_connection(listenfd,std::move(lc),CONN_BASE_EVENTS);
+    if(!reactor.add_connection(listenfd,std::move(lc),CONN_BASE_EVENTS))
+    {
+        std::cerr << "register listen fd failed,cannot serve" << std::endl;
+        return 1;
+    }
 
     //将 worker 的 eventfd 复制进 epoll
     int wake_fd = fcntl(worker.wakeup_fd(),F_DUPFD_CLOEXEC,0);//F_DUPFD_CLOEXEC 复制 + 自动 close-on-exec
@@ -508,7 +540,11 @@ int main(int argc,char* argv[])
     wake_conn->on_write = nullptr;
 
     //只关注 EPOLLIN
-    reactor.add_connection(wake_fd,std::move(wake_conn),EPOLLIN);
+    if(!reactor.add_connection(wake_fd,std::move(wake_conn),EPOLLIN))
+    {
+        std::cerr << "register wakeup fd failed,cannot reply" << std::endl;
+        return 1;
+    }
 
     bool ok = reactor.loop();
 

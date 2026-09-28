@@ -101,17 +101,49 @@ def wait_port(port: int = PORT, timeout: float = 10.0) -> bool:
 
 
 def start_server(db_path: str, log_path: str, port: int = PORT, binary: str = BINARY, env: dict = None):
-    """启动服务器并等端口可用；返回 Popen（端口没起来则抛 RuntimeError）"""
-    log = open(log_path, "wb")
+    """启动服务器并等它就绪；返回 Popen
+
+    没起来 / 起来后又退出 / 端口后面不是我们的服务 → 抛 RuntimeError。
+    日志用【追加】而不是覆盖：一个测试里重启多次时，前面实例的日志不能被冲掉
+    （否则 ASan/TSan 只会检查到最后一次实例的输出）。run_all.sh/run_asan.sh/run_tsan.sh
+    在每轮开始前会清一次相关日志。
+    """
+    log = open(log_path, "ab")
     child_env = os.environ.copy()
     if env:
         child_env.update(env)
     proc = subprocess.Popen([binary, db_path], stdout=log, stderr=subprocess.STDOUT,
                             env=child_env)
+    log.write(f"\n===== start_server pid={proc.pid} binary={binary} "
+              f"at {time.strftime('%H:%M:%S')} =====\n".encode())
+    log.flush()
+
     if not wait_port(port):
         proc.kill()
         proc.wait(timeout=5)
         raise RuntimeError(f"服务器未在超时内监听 {port}（日志: {log_path}）")
+
+    # 端口开着 != "我们启动的那个进程"在服务：
+    #   · 可能是别的进程占着这个端口（我们的进程其实已经退出了）
+    #   · 可能我们的进程还活着但其实没在服务
+    if proc.poll() is not None:
+        raise RuntimeError(f"{binary} 启动后立刻退出（rc={proc.returncode}，日志: {log_path}）")
+
+    # 握一手：端口后面必须是一个会说我们协议的服务器（只读探测，不写数据）
+    try:
+        s = connect(port)
+        st, _ = request(s, OP_GET, b"__startup_probe__", timeout=5.0)
+        s.close()
+    except Exception as e:                       # noqa: BLE001
+        proc.kill()
+        proc.wait(timeout=5)
+        raise RuntimeError(f"{port} 后面的服务没有按 KV 协议应答（{type(e).__name__}: {e}）")
+
+    if st not in (ST_OK, ST_NOTFOUND):
+        proc.kill()
+        proc.wait(timeout=5)
+        raise RuntimeError(f"{port} 后面的服务返回异常状态 status={st}（不是我们的 KV 服务器？）")
+
     return proc
 
 

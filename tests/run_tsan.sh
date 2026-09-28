@@ -16,6 +16,9 @@ OUT=/tmp/kv-tsan
 RUNS=5
 mkdir -p "$OUT"
 
+#每轮开始清一次日志（start_server 现在追加写日志，跨轮次必须清旧的）
+rm -f /tmp/kv_*.log
+
 echo "== 构建（-fsanitize=thread）=="
 g++ -std=c++17 -Wall -Wextra -fsanitize=thread -g -O1 -Isrc -pthread \
     tests/test_storage_worker.cpp \
