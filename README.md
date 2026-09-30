@@ -210,7 +210,7 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 ./build/kvbench --op get --conns 8 --pipeline 16 --keyspace 1000 --duration 3
 ```
 
-### 3.1 写入：吞吐被 `fsync` 钉死，开流水线只增加排队
+### 3.1 写入：一次 fsync 提交一批（批提交前 vs 后的对照）
 
 | 口径 | QPS | 平均 | P50 | P90 | P99 |
 |---|---:|---:|---:|---:|---:|
