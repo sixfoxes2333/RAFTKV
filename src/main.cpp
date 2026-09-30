@@ -437,9 +437,38 @@ int main(int argc,char* argv[])
     //数据库默认路径
     const char* db_path = (argc > 1) ? argv[1] : "kvdb.data";
 
+    kv::StorageWorker::SyncMode sync_mode = kv::StorageWorker::SyncMode::Always;
+    const char* sync_mode_name = "always";
+
+    if(const char* p = getenv("KV_SYNC_MODE"))
+    {
+        std::string m = p;
+        if(m == "always")
+        {
+            sync_mode = kv::StorageWorker::SyncMode::Always;
+            sync_mode_name = "always";
+        }
+        else if(m == "everysec")
+        {
+            sync_mode = kv::StorageWorker::SyncMode::Everysec;
+            sync_mode_name = "everysec";
+        }
+        else if(m == "off")
+        {
+            sync_mode = kv::StorageWorker::SyncMode::Off;
+            sync_mode_name = "off";
+        }
+        else
+        {
+            std::cerr << "invalid KV_SYNC_MODE : " << m << " (expect always / everysec / off) " << std::endl;
+            return 1;
+        }
+    }
+
+    std::cout << "sync mode = " << sync_mode_name << std::endl;
 
     //存储 worker 先于 Reactor 创建
-    kv::StorageWorker worker(db_path);
+     kv::StorageWorker worker(db_path,1024,sync_mode);
 
     if(!worker.ready())
     {

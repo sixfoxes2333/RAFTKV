@@ -215,6 +215,14 @@ else
     fail=$((fail + 1))
 fi
 
+echo
+echo "== $((++STEP)) 批提交（always 提速 / 批 fsync 失败整批不可信 / everysec 节流 / off）=="
+if python3 tests/group_commit_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

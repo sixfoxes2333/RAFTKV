@@ -147,8 +147,10 @@ def part_b():
         print(f"  前几个回复：{seq[:8]}")
 
         check("队列灌满时必须回 Error（不是静默丢弃）", n_err >= 1, "一个 Error 都没收到")
-        check("Error 之后连接被关闭（读到 EOF，而不是继续收到 Ok）",
-              tail == "EOF" and after_err == 0,
+        # 连接结束的形式可能是干净的 EOF，也可能是 RST（客户端还在发数据时服务器关闭就会这样）
+        # 两者语义相同：客户端必须把这批在途请求当成"未知"；不许再收到 Ok
+        check("Error 之后连接必须结束（EOF 或 RST），不许继续收到 Ok",
+              tail in ("EOF", "CLOSED_ERR") and after_err == 0,
               f"结尾={tail}，Error 之后还收到 {after_err} 帧")
         check("只回一个 Error（第一个失败就该停止服务这条连接）", n_err == 1, f"n_err={n_err}")
         s.close()

@@ -10,7 +10,7 @@
 namespace kv
 {
 
-    StorageWorker::StorageWorker(const std::string &path,size_t max_pending):storage_(path),max_pending_(max_pending)
+    StorageWorker::StorageWorker(const std::string &path,size_t max_pending,SyncMode mode):storage_(path),max_pending_(max_pending),mode_(mode)
     {
         //打开文件并 recover()
         //失败则 good() 为 false
@@ -116,49 +116,146 @@ namespace kv
 
     }
 
+    bool StorageWorker::flush_if_needed(bool force)
+    {
+        if(!dirty_)
+        {
+            return true;
+        }
+
+        if(!force)
+        {
+            if(mode_ == SyncMode::Everysec && std::chrono::steady_clock::now() - last_flush_ < std::chrono::seconds(1))
+            {
+                return true;
+            }
+
+            if(mode_ == SyncMode::Off)
+            {
+                return true;
+            }
+        }
+
+        if(!storage_.flush())
+        {
+            return false;
+        }
+
+        dirty_ = false;
+        last_flush_ = std::chrono::steady_clock::now();
+        return true;
+
+
+    }
+
+
+
     void StorageWorker::worker_loop()
     {
+
+        std::vector<StorageTask>batch;
+        std::vector<StorageCompletion>done_batch;
+        std::vector<unsigned char>is_write;
+
         while(true)
         {
-            StorageTask task;
-
+            batch.clear();
             {
                 std::unique_lock<std::mutex>lock(mutex_);
 
-                //直到有新任务才被唤醒
-                cv_.wait(lock,[this]{return stopping_ || !pending_.empty();});
+                if(mode_ == SyncMode::Everysec)
+                {
+                    cv_.wait_for(lock,std::chrono::milliseconds(1000),[this]{return stopping_ || !pending_.empty();});
+                }
+                else
+                {
+                    cv_.wait(lock,[this]{return stopping_ || !pending_.empty();});
+                }
 
                 if(stopping_ && pending_.empty())
                 {
+                    lock.unlock();
+                    flush_if_needed(true); //推出前落盘
                     break;
                 }
 
-                task = std::move(pending_.front()); //从头部取
-                pending_.pop_front();
+                if(pending_.empty())
+                {
+                    lock.unlock();
+                    flush_if_needed(false); //everysec 超时醒来落盘
+                    continue;
+                }
+
+                size_t batch_bytes = 0;
+                while(!pending_.empty() && batch.size() < MAX_BATCH_SIZE)
+                {
+                    if(!batch.empty() && batch_bytes + pending_.front().bytes > MAX_BATCH_BYTES)
+                    {
+                        break;
+                    }
+
+                    batch_bytes += pending_.front().bytes;
+                    batch.push_back(std::move(pending_.front()));
+                    pending_.pop_front();
+                }
+            }
+
+            done_batch.clear();
+            is_write.clear();
+            bool any_write = false;
+
+            for(auto &task : batch)
+            {
+                StorageCompletion done;
+                done.fd = task.fd;
+                done.connection_id = task.connection_id;
+                done.sequence = task.sequence;
+                done.bytes = task.bytes;
+
+                bool write = false;
+                if(task.parse_failed)
+                {
+                    done.response.status = Status::Error;
+                }
+                else
+                {
+                    done.response = execute(task.request);
+                    write = (task.request.op != Op::Get);
+                }
+
+                any_write = any_write || write;
+                is_write.push_back(write ? 1:0);
+                done_batch.push_back(std::move(done));
 
             }
 
-            StorageCompletion done;
-            done.fd = task.fd;
-            done.connection_id = task.connection_id;
-            done.sequence = task.sequence;
-            done.bytes = task.bytes;
-            
-            if(task.parse_failed)
+            if(any_write)
             {
-                done.response.status = Status::Error;
+                dirty_ = true;
             }
-            else
+
+            if(!flush_if_needed(false))
             {
-                done.response = execute(task.request);
+                for(size_t i = 0 ; i < done_batch.size() ; i++)
+                {
+                    if(is_write[i])
+                    {
+                        done_batch[i].response.status = Status::Error;
+                    }
+                }
             }
 
             {
                 std::lock_guard<std::mutex>lock(mutex_);
-                completed_.push_back(std::move(done));
-                notify_locked();
+                for(auto &done : done_batch)
+                {
+                    completed_.push_back(std::move(done));
+                    notify_locked();
+                }
             }
+            
         }
+
     }
 
 
@@ -179,7 +276,7 @@ namespace kv
             {    //put 内部 编码->追加写->fsync->更新 keydir
                 //false = 写失败 或 提交结果不确定
 
-                resp.status = storage_.put(req.key,req.value) ? Status::Ok : Status::Error;
+                resp.status = storage_.put_deferred(req.key,req.value) ? Status::Ok : Status::Error;
                 break;
             }
 
@@ -214,7 +311,7 @@ namespace kv
                 }
                 else
                 {
-                    resp.status = storage_.del(req.key) ? Status::Ok : Status::Error;
+                    resp.status = storage_.del_deferred(req.key) ? Status::Ok : Status::Error;
                 }
                 break;
             }

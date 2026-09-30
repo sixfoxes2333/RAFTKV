@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include<chrono>
 
 
 namespace kv
@@ -44,8 +45,17 @@ namespace kv
     class StorageWorker
     {
     public:
+
+        enum class SyncMode
+        {
+            Always, //每条都 fsync
+            Everysec, //每秒 fsync
+            Off //从不
+        };
+
+
         //path 数据库文件 max_pending 队列上限
-        explicit StorageWorker(const std::string & path,size_t max_pending = 1024);
+        explicit StorageWorker(const std::string & path,size_t max_pending = 1024,SyncMode mode = SyncMode::Always);
         ~StorageWorker();
 
         //不可复制或移动
@@ -77,6 +87,12 @@ namespace kv
 
 
     private:    
+
+        static constexpr size_t MAX_BATCH_SIZE = 256; //每批次最多攒多少条
+        static constexpr size_t MAX_BATCH_BYTES = 8*1024*1024; //每批次最多请求多少字节
+
+        bool flush_if_needed(bool force); //false 即落盘失败
+
         void worker_loop(); //后台线程入口
         Response execute(const Request &req); //存储调用
         void notify_locked(); //写 eventfd 调用要持有 mutex_
@@ -86,6 +102,11 @@ namespace kv
         size_t max_pending_ = 0;
 
         size_t inflight_bytes_ = 0; //队列中所有任务的请求体总字节
+
+        SyncMode mode_ = SyncMode::Always;
+        bool dirty_ = false;
+        std::chrono::steady_clock::time_point last_flush_ = std::chrono::steady_clock::now();
+
 
         std::atomic<bool>ready_{false};
 

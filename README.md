@@ -3,9 +3,9 @@
 一个从零手写的持久化键值存储服务：epoll 事件循环 + 后台存储线程 + 二进制协议 + Bitcask 风格日志存储。
 支持 `SET` / `GET` / `DEL`，每条写都 `fsync`，进程被 `kill -9` 后重启数据仍在。
 
-> 当前状态：**单节点持久化 KV 已完成**（tag `storage-v1`），并做过一轮系统性的 review 修复
-> （阻塞项 4 条 + 重要项若干，22 项回归 + ASan/UBSan + TSan 全绿，见 §3/§4）。
-> 下一步：**group commit**（写入提速）→ 然后在其上实现 Raft，做成 3 副本的 RaftKV。
+> 当前状态：**单节点持久化 KV 已封版**（tag `storage-v1.2`）—— 单机存储 + 网络层 + 异步架构 +
+> 批提交（group commit）全部完成，**23 项回归** + ASan/UBSan + TSan 全绿（见 §3/§4）。
+> 下一步：在其上实现 Raft，做成 3 副本的 RaftKV。
 
 ```bash
 ./build/kvserver /tmp/db.data &          # 启动（默认 ./kvdb.data）
@@ -107,8 +107,9 @@ Reactor 线程只做协议解析和投递，`Storage` 只被 worker 线程访问
 ```
 
 **代价也必须说清楚**：单 worker 意味着存储操作串行。同一个实验里，另一个连接的 `GET`
-要排在慢 `SET` 后面，实测 **658ms**。压测同样能看到：`SET` 吞吐与并发/流水线**无关** ——
-闭环 C=1 是 179 ops/s，流水线 p=16 C=8 也只有 171 ops/s，而 P50 从 4.6ms 涨到 543ms（见 §3.1）。
+要排在慢 `SET` 后面，实测 **658ms**。【批提交之前】压测还能看到：`SET` 吞吐与并发/流水线**无关** ——
+闭环 C=1 是 179 ops/s，流水线 p=16 C=8 也只有 171 ops/s，而 P50 从 4.6ms 涨到 543ms；
+做完 group commit（§2.10）后，同样口径是 **10 281 ops/s、P50 9.1ms**（见 §3.1）。
 
 ### 2.5 所有"会增长的东西"都有上限（内存 / 连接 / 时间）
 
@@ -170,6 +171,33 @@ peer_closed && out_ 为空 && pending_requests == 0
 
 ---
 
+### 2.10 持久化策略：三种提交模式（`KV_SYNC_MODE`）
+
+单条 fsync 要 4.6ms，所以"每条写各自 fsync"把写入钉在 ~180 ops/s。批提交让**一次 fsync 覆盖一批**；
+三种模式共用同一个批提交器，区别只在"什么时候落盘"：
+
+| 模式 | 什么时候 fsync | 契约 | 实测（p=16 C=8） |
+|---|---|---|---:|
+| `always`（默认） | 每批提交前 | 已确认的写，掉电也不丢 | 10 281 ops/s |
+| `everysec` | 最多每秒一次 | 掉电最多丢 1 秒（页缓存语义） | 98 210 ops/s |
+| `off` | 不主动落盘 | 只用于对照实验 | 101 489 ops/s |
+
+注意 `everysec` 和 `off` 几乎同速（98 210 vs 101 489，差 3%）：**"每秒落一次盘"的成本可以忽略，
+真正的成本是"每条写都落盘"** —— 这也是工业界普遍把每秒一次作为默认档的原因（Redis 的 `appendfsync everysec` 同理）。
+
+两个刻意的设计决定：
+
+- **攒批不等待**：只搬"此刻已经排在队列里的任务"，不为了凑更大的批而睡一会儿 —— 所以单条请求的延迟不变
+  （闭环 P50 仍是 4.6ms），收益全部来自并发/流水线带来的自然批量；
+- **一批失败要一起失败**：这一批的 fsync 失败时，批里**所有写**都回 `Error`（不能只报一半，
+  让另一半个客户端当成成功）——"提交结果不确定"与"普通失败"严格区分（见 §2.3）。
+
+一个容易混淆的点：`kill -9` 与**掉电**不是一回事 —— `kill -9` 只杀进程，**页缓存还在内核里**，
+所以 `everysec` 模式下已确认的写仍然活着（本项目的 `kill -9` 测试证明的是"库能打开、数据没被写坏"）；
+`always` 才是"连内核页缓存都丢了（掉电）也不丢"。
+
+---
+
 ## 3. 实测数据
 
 环境：WSL2 / Linux，64 字节 value，键空间 1000，客户端为 **C++ 压测客户端 `tests/kvbench`**
@@ -186,13 +214,19 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 
 | 口径 | QPS | 平均 | P50 | P90 | P99 |
 |---|---:|---:|---:|---:|---:|
-| SET 闭环 C=1 | 179.2 | 4.65ms | 4.60ms | 4.66ms | 5.61ms |
-| SET 流水线 p=16 C=1 | 183.6 | 38.4ms | **38.3ms** | 67.7ms | 74.2ms |
-| SET 流水线 p=16 C=8 | 170.5 | 543ms | **543ms** | 573ms | 582ms |
+| 口径 | QPS | 平均 | P50 | P99 |
+|---|---:|---:|---:|---:|
+| **批提交前**：SET 流水线 p=16 C=8 | 170.5 | 543ms | **543ms** | 582ms |
+| SET 闭环 C=1（一次 fsync 的单条延迟） | 178.2 | 4.67ms | **4.60ms** | 5.66ms |
+| SET 流水线 p=16 C=1（`always`） | 1 299 | 7.2ms | 8.96ms | 10.1ms |
+| SET 流水线 p=16 C=8（`always`） | **10 281** | 9.3ms | 9.12ms | 10.9ms |
+| SET 流水线 p=16 C=1（`everysec`） | 48 811 | 142µs | 134µs | 313µs |
+| SET 流水线 p=16 C=8（`everysec`） | **98 210** | 903µs | 833µs | 1.39ms |
 
-→ 吞吐恒为 **~180 ops/s = 1 / fsync 延迟(4.6ms)**，与并发、流水线深度**无关**；
-开流水线的唯一效果是把"等待"变成"排队"（P50 4.6ms → 38ms → 543ms）。
-**这就是做完单节点之后立刻要做 group commit 的理由：一次 fsync 提交多条，是唯一的提速路径。**
+→ **一次 fsync 提交一批**之后：写入 **170.5 → 10 281 ops/s（60×）**，P50 **543ms → 9.1ms（59×）**。
+→ **单条请求的延迟没变**（闭环 P50 仍是 4.60ms = 一次 fsync 的本体）：攒批只取"已经排队的请求"，
+  不等待新请求 —— 这是刻意设计（等待会引入固定延迟，见 §2.10）。
+→ `everysec` 模式（最多每秒落一次盘）进一步到 **98 210 ops/s**，代价是契约变成"掉电最多丢 1 秒"。
 
 ### 3.2 读取：流水线才是重点（旧口径"~38k 上限"是闭环假象）
 
@@ -208,7 +242,7 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 
 → 同并发对比：C=1 **5.6k → 51.3k（9.2×）**；C=8 **24.8k → 85.0k（3.4×）**。
 闭环客户端量到的是 RTT 而不是服务器能力 —— 所以"单 worker 上限 38k"是假象，
-真正的上限要开流水线才量得出来（这台机器上 ≈85k ops/s，之后需要多 Reactor 或读旁路）。
+真正的上限要开流水线才量得出来（这台机器上 p=64、`off` 模式约 **124k ops/s**；此时 Reactor 线程已 100%，见 §5）。
 
 （历史：缺 `TCP_NODELAY` 时，同一口径 p=16 C=1 只有约 300 ops/s —— Nagle 与延迟 ACK 把
 小回复攒住 40ms。加一行 `setsockopt(TCP_NODELAY)` 之后是 51 343。围栏 `net_nodelay_test.py`
@@ -245,7 +279,7 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 ## 4. 测试与工具
 
 ```bash
-bash tests/run_all.sh            # 22 项快速回归
+bash tests/run_all.sh            # 23 项快速回归
 bash tests/run_all.sh --slow     # 追加：崩溃注入 + 故障注入 + 慢 fsync 注入
 bash tests/run_all.sh --asan     # 追加：ASan/UBSan（服务器 + 端到端场景）
 bash tests/run_asan.sh           # ASan/UBSan（存储单测 + 背压 + 端到端，检查 sanitizer 输出）
@@ -268,6 +302,7 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 | `tests/db_lock_test.py` | 数据文件互斥：第二个实例不许动正在用的库 |
 | `tests/reply_order_test.py` | 回复顺序 + 过载语义 |
 | `tests/queue_bytes_test.py` `in_buffer_budget_test.py` `net_frame_timeout_test.py` | 三条内存/时间上限（后台队列字节、收包全局字节、半条帧超时） |
+| `tests/group_commit_test.py` | 批提交三模式：批量提速 / 单条延迟不变 / 批 fsync 失败整批不可信 / everysec 节流与 1 秒契约 / off |
 | `tests/net_epoll_add_fail_test.py` `startup_probe_test.py` | 注册失败要响亮退出；脚手架自身的启动探测 |
 | `tests/net_*_test.py`（半关闭 / EMFILE / 启动失败） | 网络层边界 |
 | `tests/crash_inject_test.py` `crash_writer.cpp` | 崩溃注入（`kill -9` / 截断 / 位翻转） |
@@ -285,18 +320,23 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 
 1. **数据集受内存限制**：keydir 全量常驻内存（1M 小 key ≈ 100MB 量级，估算值，未实测）。
 2. **日志不回收**：追加日志只增不减，尚未实现 compaction（需要合并 + hint 文件重建索引）。
-3. **写吞吐 = 1/fsync ≈ 180 ops/s**：与并发/流水线无关（见 3.1）。改进方向是 group commit
-   （合并一次 fsync 提交多条）；在那之前，加深流水线只会让 P50 从 4.6ms 涨到 543ms。
-4. **读上限 ≈ 85k ops/s（p=16 C=8）**：单 Reactor 串行处理所有连接；再往上需要多 Reactor
-   （`SO_REUSEPORT`）或让读旁路 worker（`pread` 无副作用，多线程读同一 fd 安全）。
+3. **写入已做批提交（group commit）**：见 §3.1 —— `always` 10 281 ops/s、`everysec` 98 210 ops/s；
+   单条请求延迟仍是 4.6ms（一次 fsync 的本体）；收益随并发/流水线深度提高（批量越大越划算）。
+4. **单 Reactor 是天花板（≈124k ops/s）**：p=64、`off` 模式下 SET **124 506** / GET **123 599** ops/s ——
+   读写同速 ⇒ 瓶颈是两者共用的那条链路。实测线程 CPU：**Reactor 线程 ~100% 单核，worker 线程只有 55%**。
+   再往上需要多 Reactor（`SO_REUSEPORT`，先解决键空间分片）或读旁路（GET 由 Reactor 直接读索引，
+   代价是打破"存储只被 worker 线程访问"这个不变量，需要分片 / RCU 之类的设计）。
+   另外：C=8 × p=256 = 2048 条在途会超过 `max_pending` 1024，触发过载保护回 `Error` ——
+   深管道要配合上限调整才有意义（见 §2.5）。
 5. **单点**：没有副本、没有故障转移（Raft 是下一步）。
 6. **无认证/无 TLS**：仅适用于可信内网。
 7. **`MAX_MESSAGE` 16MB**：单条消息上限，超过则视为协议错误并关闭连接。
 8. **收包预算是"总量"而不是"公平分配"**：128MB 被半条帧吃满时，被关掉的是"正在长大的那条连接"，
    可能包含合法但很慢的客户端；半条帧超时（30s）负责把这种占用限制在时间上。
 9. **半条帧超时粒度 1s**：靠 `epoll_wait` 的 1s 周期扫描实现，所以 800ms 的超时会在大约 1s 内生效。
-10. **每次 SET 都 fsync**（`sync_on_put_ = true`）：没有 `everysec` 之类的模式；group commit 会带来
-   `always` / `everysec` / `off` 三种模式（Raft 日志用 always，状态机用 everysec）。
+10. **三种提交模式已实现**（`KV_SYNC_MODE=always|everysec|off`，默认 `always`）：
+    `always` = 回复前这批必须落盘；`everysec` = 最多每秒落一次（契约"最多丢 1 秒"）；`off` = 只用于对照实验。
+    非法取值会**拒绝启动**（不许静默降级）。Raft 阶段：日志用 `always`，状态机用 `everysec`。
 
 ---
 
@@ -316,8 +356,8 @@ CMakeLists.txt
 
 ## 7. 后续计划
 
-1. **group commit**：三种模式共享一个 batcher（`always` / `everysec` / `off`），
-   把写入从 ~180 ops/s 提到万级，同时保持 `kill -9` 数据仍在（页缓存）。
+1. ~~**group commit**~~ ✅ 已完成（`storage-v1.2`）：一次 fsync 提交一批，写入 170 → 10 281 ops/s
+   （`always`）/ 98 210 ops/s（`everysec`），单条延迟不变（见 §2.10 / §3.1）。
 2. **Raft**：leader 选举、日志复制、持久化 `currentTerm/votedFor/log`、apply 到本存储。
 3. 可靠性验证：网络分区/丢包/重排、客户端请求去重、线性一致性检查。
 4. 快照与日志压缩；ReadIndex / Lease Read 优化只读。

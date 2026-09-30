@@ -35,6 +35,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/epoll.h>
+#include <stdio.h>
+#include <fcntl.h>
 
 static int env_int(const char *name)
 {
@@ -128,6 +130,39 @@ int fsync(int fd)
         errno = EIO;             /* 模拟"落盘失败" */
         return -1;
     }
+    /* KV_COUNT_FSYNC=/path：记录每次真正落盘的时间戳，供测试观察。
+       这里用 dlsym 拿到的真 write，绕过本文件自己的 write 包装（否则会污染 KV_FAIL_WRITE_CALL 计数）。 */
+    const char *count_path = getenv("KV_COUNT_FSYNC");
+
+    if(count_path != NULL && *count_path != '\0')
+    {
+        static ssize_t (*real_write_local)(int,const void *,size_t) = NULL;
+
+        if(real_write_local == NULL)
+        {
+            real_write_local = (ssize_t (*)(int,const void *,size_t))dlsym(RTLD_NEXT,"write");
+        }
+
+        int cf = open(count_path,O_WRONLY | O_CREAT | O_APPEND,0644);
+
+        if(cf >= 0)
+        {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC,&now);
+
+            char line[64];
+            int n = snprintf(line,sizeof(line),"%lld fd=%d\n",
+                             (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000,fd);
+
+            if(real_write_local != NULL && n > 0)
+            {
+                (void)real_write_local(cf,line,(size_t)n);
+            }
+
+            close(cf);
+        }
+    }
+
 
     return real_fsync(fd);
 }

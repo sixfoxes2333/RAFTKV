@@ -61,6 +61,13 @@ namespace kv
 
         bool get(const std::string &key,std::string &value); //根据 key 查询 value
         bool del(const std::string &key); //删除指定 key 并追加墓碑标记
+ 
+        //延迟落盘 追加写 
+        bool put_deferred(const std::string &key,const std::string &value);
+        bool del_deferred(const std::string &key);
+
+        //将已追加写的未落盘数据 fsync
+        bool flush();
 
 
     private:

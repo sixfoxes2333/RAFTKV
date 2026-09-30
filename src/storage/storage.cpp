@@ -293,28 +293,7 @@ namespace kv
 
     bool Storage::put(const std::string &key,const std::string &value)
     {
-        //合法性检查
-        if(key.empty() || key.size() > MAX_KEY || value.size() > MAX_VALUE)
-        {
-            return false;
-        }
-
-        //编码 转换为 SET 记录
-        std::string rec = encode_record(RecordType::Set,key,value);
-
-        //记录落在文件末尾，先取当前位置作为偏移 (追加)
-        off_t offset = append_record(rec);
-
-        if(offset < 0)
-        {
-            return false;
-        }
-
-        //更新内存索引 指向最新
-        index_[key] = IndexEntry{static_cast<uint64_t>(offset),static_cast<uint32_t>(rec.size())};
-
-        return true;
-
+        return put_deferred(key,value) && flush();
     }
 
 
@@ -359,13 +338,6 @@ namespace kv
             return -1;
         }
 
-        //策略落盘
-        if(sync_on_put_ && fsync(fd_) != 0)
-        {
-            std::cerr << "fsync failed : " <<strerror(errno) << std::endl;
-            poisoned_ = true;
-            return -1;
-        }
 
         return offset;
 
@@ -413,32 +385,7 @@ namespace kv
 
     bool Storage::del(const std::string &key)
     {
-        //非法 key
-        if(key.empty() || key.size() > MAX_KEY)
-        {
-            return false;
-        }
-
-        //不存在 key 不追加无意义墓碑
-        auto it = index_.find(key);
-        if(it == index_.end())
-        {
-            return false;
-        }
-
-        //DEL 记录没有 value
-        std::string rec = encode_record(RecordType::Del,key,"");
-
-        off_t offset = append_record(rec);
-
-        if(offset < 0)
-        {
-            return false;
-        }
-
-        index_.erase(it);
-
-        return true;
+        return del_deferred(key) && flush();
 
     }
 
@@ -529,6 +476,81 @@ namespace kv
         return true;
 
     }
+
+    bool Storage::put_deferred(const std::string &key,const std::string &value)
+    {
+        //合法性检查
+        if(key.empty() || key.size() > MAX_KEY || value.size() > MAX_VALUE)
+        {
+            return false;
+        }
+
+        //编码 转换为 SET 记录
+        std::string rec = encode_record(RecordType::Set,key,value);
+
+        //记录落在文件末尾，先取当前位置作为偏移 (追加)
+        off_t offset = append_record(rec);
+
+        if(offset < 0)
+        {
+            return false;
+        }
+
+        //更新内存索引 指向最新
+        index_[key] = IndexEntry{static_cast<uint64_t>(offset),static_cast<uint32_t>(rec.size())};
+
+        return true;
+    }
+
+
+    bool Storage::del_deferred(const std::string &key)
+    {
+        //非法 key
+        if(key.empty() || key.size() > MAX_KEY)
+        {
+            return false;
+        }
+
+        //不存在 key 不追加无意义墓碑
+        auto it = index_.find(key);
+        if(it == index_.end())
+        {
+            return false;
+        }
+
+        //DEL 记录没有 value
+        std::string rec = encode_record(RecordType::Del,key,"");
+
+        off_t offset = append_record(rec);
+
+        if(offset < 0)
+        {
+            return false;
+        }
+
+        index_.erase(it);
+
+        return true;
+    }
+
+
+    bool Storage::flush()
+    {
+        if(!sync_on_put_)
+        {
+            return true;
+        }
+
+        if(fsync(fd_) != 0)
+        {
+            std::cerr << "fsync failed : " << strerror(errno) << std::endl;
+            poisoned_ = true;
+            return false;
+        }
+
+        return true;
+    }
+
 
 
 
