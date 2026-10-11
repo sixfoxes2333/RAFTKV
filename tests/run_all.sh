@@ -223,6 +223,21 @@ else
     fail=$((fail + 1))
 fi
 
+echo "== $((++STEP)) Raft term/vote 持久化（大端格式 / 损坏必须拒绝 / 改名替换后只留正式文件）=="
+if ./build/test_raft_state; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft term/vote 写路径失败（write/fsync 失败必须报错，错误信息不许丢）=="
+if python3 tests/raft_state_fault_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

@@ -81,3 +81,10 @@ target_link_libraries(test_storage_worker PRIVATE Threads::Threads)
 target_include_directories(kvbench PRIVATE src)
 target_link_libraries(kvbench PRIVATE Threads::Threads)
 
+#Raft：term/vote 持久化（单测 + LD_PRELOAD 故障注入在 raft_state_fault_test.py）
+add_executable(test_raft_state
+tests/test_raft_state.cpp
+src/raft/state.cpp
+src/storage/record.cpp)
+target_include_directories(test_raft_state PRIVATE src)
+
