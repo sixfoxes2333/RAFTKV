@@ -88,3 +88,9 @@ src/raft/state.cpp
 src/storage/record.cpp)
 target_include_directories(test_raft_state PRIVATE src)
 
+
+#Raft：日志存储（单测 + LD_PRELOAD 故障注入在 logstore_fault_test.py）
+add_executable(test_logstore
+tests/test_logstore.cpp
+src/raft/logstore.cpp)
+target_include_directories(test_logstore PRIVATE src)

@@ -238,6 +238,23 @@ else
     fail=$((fail + 1))
 fi
 
+
+echo
+echo "== $((++STEP)) Raft 日志存储（追加/读取/截断/恢复 + 损坏必须拒绝 + 残尾修复）=="
+if ./build/test_logstore; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft 日志存储写路径失败（pwrite/fsync/ftruncate 失败必须报错）=="
+if python3 tests/logstore_fault_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

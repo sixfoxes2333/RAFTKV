@@ -73,6 +73,11 @@ run_bin test_recovery
 echo "[ASan] 运行类型契约测试（编译期断言，顺带确认可执行）"
 run_bin test_noncopyable
 
+echo "[ASan] 运行 Raft term/vote 持久化测试"
+run_bin test_raft_state
+echo "[ASan] 运行 Raft 日志存储测试"
+run_bin test_logstore
+
 # ---- 3. 网络场景：背压（写满 → EAGAIN → 短写续写），必须真的跑起来 ----
 export KV_SERVER="$BUILD/kvserver"
 CLIENT_LOG=/tmp/kv_asan_backpressure.log

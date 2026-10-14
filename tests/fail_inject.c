@@ -10,6 +10,10 @@
  *
  * 【环境变量】
  *   KV_FAIL_WRITE_CALL=N      第 N 次 write()（1-based，只计对 fd>2 的调用）返回 -1/ENOSPC
+ *   KV_FAIL_PWRITE_CALL=N     第 N 次 pwrite()（只计对 fd>2 的调用）返回 -1/EIO
+ *                             （Raft 日志用 pwrite 定位写，不经过 write()）
+ *   KV_FAIL_PREAD_CALL=N      第 N 次 pread()（只计对 fd>2 的调用）返回 -1/EIO
+ *   KV_SHORT_PWRITE=1         每次 pwrite() 最多只写 1 字节（验证循环拼装正确）
  *   KV_FAIL_FTRUNCATE_CALL=N  第 N 次 ftruncate() 返回 -1/EIO
  *   KV_FAIL_FSYNC_CALL=N      第 N 次 fsync() 返回 -1/EIO
  *   KV_FAIL_EPOLL_ADD=N      第 N 次 epoll_ctl(EPOLL_CTL_ADD) 返回 -1/ENOMEM
@@ -56,6 +60,8 @@ static int g_ftruncate_calls = 0;
 static int g_fsync_calls = 0;
 static int g_epoll_add_calls = 0;
 
+static int g_pwrite_calls = 0;
+static int g_pread_calls = 0;
 ssize_t write(int fd,const void *buf,size_t count)
 {
     static ssize_t (*real_write)(int,const void *,size_t) = NULL;
@@ -99,6 +105,61 @@ int ftruncate(int fd,off_t length)
     }
 
     return real_ftruncate(fd,length);
+}
+
+/* Raft 日志用 pwrite/pread 做定位读写（不经过 write），所以单独挂钩子。
+   KV_SHORT_PWRITE=1 时每次最多写 1 字节：用来验证 write_full 的循环拼接。 */
+ssize_t pwrite(int fd,const void *buf,size_t count,off_t offset)
+{
+    static ssize_t (*real_pwrite)(int,const void *,size_t,off_t) = NULL;
+
+    if(real_pwrite == NULL)
+    {
+        real_pwrite = (ssize_t (*)(int,const void *,size_t,off_t))dlsym(RTLD_NEXT,"pwrite");
+    }
+
+    if(fd > 2)
+    {
+        int fail_at = env_int("KV_FAIL_PWRITE_CALL");
+        g_pwrite_calls++;
+
+        if(fail_at > 0 && g_pwrite_calls == fail_at)
+        {
+            errno = EIO;             /* 模拟"写盘失败" */
+            return -1;
+        }
+
+        if(env_int("KV_SHORT_PWRITE") > 0 && count > 1)
+        {
+            count = 1;
+        }
+    }
+
+    return real_pwrite(fd,buf,count,offset);
+}
+
+ssize_t pread(int fd,void *buf,size_t count,off_t offset)
+{
+    static ssize_t (*real_pread)(int,void *,size_t,off_t) = NULL;
+
+    if(real_pread == NULL)
+    {
+        real_pread = (ssize_t (*)(int,void *,size_t,off_t))dlsym(RTLD_NEXT,"pread");
+    }
+
+    if(fd > 2)
+    {
+        int fail_at = env_int("KV_FAIL_PREAD_CALL");
+        g_pread_calls++;
+
+        if(fail_at > 0 && g_pread_calls == fail_at)
+        {
+            errno = EIO;             /* 模拟"读盘失败" */
+            return -1;
+        }
+    }
+
+    return real_pread(fd,buf,count,offset);
 }
 
 int fsync(int fd)

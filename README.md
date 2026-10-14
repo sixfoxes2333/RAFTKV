@@ -4,7 +4,8 @@
 支持 `SET` / `GET` / `DEL`，每条写都 `fsync`，进程被 `kill -9` 后重启数据仍在。
 
 > 当前状态：**单节点持久化 KV 已封版**（tag `storage-v1.2`）—— 单机存储 + 网络层 + 异步架构 +
-> 批提交（group commit）全部完成，**23 项回归** + ASan/UBSan + TSan 全绿（见 §3/§4）。
+> 批提交（group commit）全部完成，**27 项回归** + ASan/UBSan + TSan 全绿（见 §3/§4）。
+> Raft 的持久化基座（term/vote 状态 + 日志存储）已完成并接入回归；选举/复制尚未实现。
 > 下一步：在其上实现 Raft，做成 3 副本的 RaftKV。
 
 ```bash
@@ -279,7 +280,7 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 ## 4. 测试与工具
 
 ```bash
-bash tests/run_all.sh            # 23 项快速回归
+bash tests/run_all.sh            # 27 项快速回归
 bash tests/run_all.sh --slow     # 追加：崩溃注入 + 故障注入 + 慢 fsync 注入
 bash tests/run_all.sh --asan     # 追加：ASan/UBSan（服务器 + 端到端场景）
 bash tests/run_asan.sh           # ASan/UBSan（存储单测 + 背压 + 端到端，检查 sanitizer 输出）
@@ -306,7 +307,9 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 | `tests/net_epoll_add_fail_test.py` `startup_probe_test.py` | 注册失败要响亮退出；脚手架自身的启动探测 |
 | `tests/net_*_test.py`（半关闭 / EMFILE / 启动失败） | 网络层边界 |
 | `tests/crash_inject_test.py` `crash_writer.cpp` | 崩溃注入（`kill -9` / 截断 / 位翻转） |
-| `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync/epoll_ctl 失败、慢 fsync） |
+| `tests/test_raft_state.cpp` `raft_state_fault_test.py` | Raft term/vote 持久化：大端格式 / 损坏必须拒绝 / 写失败语义 / 系统调用顺序 |
+| `tests/test_logstore.cpp` `logstore_fault_test.py` | Raft 日志存储：追加/读取/截断/恢复、残尾修复与完整损坏拒绝、pwrite/fsync/ftruncate 失败、批 fsync 计数与调用顺序 |
+| `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync/epoll_ctl/pwrite/pread 失败、短写、慢 fsync） |
 
 两个测试工程上的约定：
 
