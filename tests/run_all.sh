@@ -255,6 +255,23 @@ else
     fail=$((fail + 1))
 fi
 
+echo
+echo "== $((++STEP)) Raft Core 初始化/发起选举（含分配失败）=="
+if ./build/test_raft_core && ./build/test_raft_core_alloc; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft 选举演练（3 节点内存投递：选主/分票/退位/重复票）=="
+if ./build/test_raft_election; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

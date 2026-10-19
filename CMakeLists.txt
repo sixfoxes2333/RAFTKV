@@ -94,3 +94,20 @@ add_executable(test_logstore
 tests/test_logstore.cpp
 src/raft/logstore.cpp)
 target_include_directories(test_logstore PRIVATE src)
+
+
+# Raft Core：初始化、发起选举与一次性内存分配失败
+add_executable(test_raft_core
+    tests/test_raft_core.cpp
+    src/raft/core.cpp)
+target_include_directories(test_raft_core PRIVATE src)
+add_executable(test_raft_core_alloc
+    tests/test_raft_core_alloc.cpp
+    src/raft/core.cpp)
+target_include_directories(test_raft_core_alloc PRIVATE src)
+
+# Raft Core：内存三节点选举演练（无 socket、无真实计时器）
+add_executable(test_raft_election
+    tests/test_raft_election.cpp
+    src/raft/core.cpp)
+target_include_directories(test_raft_election PRIVATE src)

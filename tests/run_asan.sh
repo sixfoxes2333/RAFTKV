@@ -77,6 +77,8 @@ echo "[ASan] 运行 Raft term/vote 持久化测试"
 run_bin test_raft_state
 echo "[ASan] 运行 Raft 日志存储测试"
 run_bin test_logstore
+echo "[ASan] 运行 Raft Core 初始化/发起选举测试"
+run_bin test_raft_core
 
 # ---- 3. 网络场景：背压（写满 → EAGAIN → 短写续写），必须真的跑起来 ----
 export KV_SERVER="$BUILD/kvserver"
