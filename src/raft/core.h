@@ -126,6 +126,29 @@ struct AppendEntriesResponse
     bool success = false;
 };
 
+//处理完 leader 的日志请求后
+struct AppendEntriesOut
+{
+    //本次保存的任期与投票 仅任期变化时才有
+    std::optional<HardState>hard_state{};
+
+    //回复里要带的本地任期
+    std::uint64_t term = 0;
+
+    //核对通过
+    bool accept = false;
+
+    //从该处开始往后删除 0 表示不删
+    std::uint64_t truncate_from = 0;
+
+    //需要追加到本地的日志
+    std::vector<LogEntry>entries;
+
+    //重开选举计时器
+    bool reset_election_timer = false;
+
+};
+
 
 class RaftCore
 {
@@ -167,14 +190,24 @@ public:
 
     bool handle_vote_response(std::uint64_t from,const RequestVoteResponse& response,VoteCountOutPut& out,std::string& error);
 
+    //收到 leader 发来的日志请求
+    bool handle_append_entries(std::uint64_t from,const AppendEntriesRequest& request,AppendEntriesOut& out,std::string& error);
+
     //绑定外层提供的只读日志视图
     bool attach_log(const LogView* log,std::string& error);
+
+    //日志写成功后调用
+    bool on_log_persisted(std::string& error);
 
     //下一条准备发给某个节点的是第几条
     std::uint64_t next_index(std::uint64_t peer)const;
 
     //已经确认复制到某个节点的是第几条
     std::uint64_t match_index(std::uint64_t peer)const;
+
+    //给 peer 打包一份日志复制请求
+    bool build_append_entries(std::uint64_t peer,AppendEntriesRequest& out,std::string& error)const;
+
 
 
 private:
@@ -213,6 +246,15 @@ std::vector<std::uint64_t>next_index_;
 
 //已经确认复制成功的 index
 std::vector<std::uint64_t>match_index_;
+
+//一次最多 64 条日志，不超过 1 Mib
+static constexpr std::size_t MAX_APPEND_ENTRIES = 64;
+static constexpr std::size_t MAX_APPEND_COMMAND_BYTES = 1024*1024;
+
+//现已提交到第几条
+std::uint64_t commit_index_ = 0;
+
+
 
 };
 

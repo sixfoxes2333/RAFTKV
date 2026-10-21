@@ -272,6 +272,22 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft 日志复制打包/接收（前一条核对、冲突截断、分批上限）=="
+if ./build/test_raft_append; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft 复制落地（真实 LogStore/StateStore：写日志、存任期、失败停机）=="
+if ./build/test_raft_append_persist; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

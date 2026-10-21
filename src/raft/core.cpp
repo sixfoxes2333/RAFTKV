@@ -212,7 +212,7 @@ bool RaftCore::handle_request_vote(std::uint64_t from,const RequestVoteRequest& 
         return false;
     }
 
-    if(from == 0 || std::find(members_.begin(),members_.end(),from) == members_.end())
+    if(std::find(members_.begin(),members_.end(),from) == members_.end())
     {
         error = "request vote: sender is not a member";
         return false;
@@ -290,7 +290,7 @@ bool RaftCore::handle_vote_response(std::uint64_t from,const RequestVoteResponse
         return false;
     }
 
-    if(from == 0 || from == self_id_ || std::find(members_.begin(),members_.end(),from) == members_.end())
+    if(from == self_id_ || std::find(members_.begin(),members_.end(),from) == members_.end())
     {
         error = "vote response: sender is not another member";
         return false;
@@ -373,6 +373,73 @@ bool RaftCore::attach_log(const LogView* log,std::string& error)
 }
 
 
+bool RaftCore::on_log_persisted(std::string& error)
+{
+    error.clear();
+
+    if(!good())
+    {
+        error = "sync log tail: core not ready";
+        return false;
+    }
+
+    if(log_ == nullptr)
+    {
+        error = "sync log tail: no log view";
+        return false;
+    }
+
+    const std::uint64_t last = log_->last_index();
+
+    std::uint64_t term = 0;
+
+    if(last != 0 && !log_->term_at(last,term))
+    {
+        error = "sync log tail: cannot read last term";
+        return false;
+    }
+
+    if(last < commit_index_)
+    {
+        error = "sync log tail: commit entry missing";
+        return false;
+    }
+
+    if(role_ == Role::Leader)
+    {
+        if(last < last_log_index_)
+        {
+            error = "sync log tail: leader log shortened";
+            return false;
+        }
+
+        if(last == last_log_index_ && term != last_log_term_)
+        {
+            error = "sync log tail: leader log replaced";
+            return false;
+        }
+    }
+
+    last_log_index_ = last;
+    last_log_term_ = term;
+
+    if(role_ == Role::Leader)
+    {
+        for(std::size_t i = 0 ; i < members_.size() ; i++)
+        {
+            if(members_[i] == self_id_)
+            {
+                match_index_[i] = last;
+            }
+        }
+
+    }
+
+    return true;
+
+}
+
+
 void RaftCore::become_leader()
 {
     role_ = Role::Leader;
@@ -414,6 +481,284 @@ std::uint64_t RaftCore::match_index(std::uint64_t peer)const
 
     return 0;
 }
+
+
+//给 peer 打包请求，next_index 是下一条准备发给它的位置
+bool RaftCore::build_append_entries(std::uint64_t peer,AppendEntriesRequest& out,std::string& error)const
+{
+    error.clear();
+
+    if(!good() || role_ != Role::Leader)
+    {
+        error = "build append : core is not a leader";
+        return false;
+    }
+
+    //找到 peer 在成员表的下标
+    std::size_t slot = members_.size();
+
+    for(std::size_t i = 0 ; i < members_.size() ; i++)
+    {
+        if(members_[i] == peer)
+        {
+            slot = i;
+            break;
+        }
+    }
+
+    if(slot == members_.size() || peer == self_id_)
+    {
+        error = "build append : target is not another member";
+        return false;
+    }
+
+    if(log_ == nullptr)
+    {
+        error = "build append : no log view";
+        return false;
+    }
+
+    const std::uint64_t last = log_->last_index();
+
+    //编号到最大
+    if(last == std::numeric_limits<std::uint64_t>::max())
+    {
+        error = "build append : log index exhausted";
+        return false;
+    }
+
+    if(commit_index_ > last)
+    {
+        error = "build append : commit index beyond log";
+        return false;
+    }
+
+    const std::uint64_t next = next_index_[slot];
+
+    //next 最大为 last+1 last+1 表示无新日志
+    if(next == 0 || next > last + 1)
+    {
+        error = "build append : invalid next index";
+        return false;
+    }
+
+    try
+    {
+        AppendEntriesRequest request;
+
+        request.term = hard_state_.current_term;
+        request.leader_id = self_id_;
+        request.leader_commit = commit_index_;
+
+        request.prev_log_index = next-1;
+
+        if(request.prev_log_index != 0)
+        {
+            if(!log_->term_at(request.prev_log_index,request.prev_log_term))
+            {
+                error = "build append : cannot read previous term";
+                return false;
+            }
+        }
+
+        //无日志 即心跳
+        if(next <= last)
+        {
+            request.entries.reserve(MAX_APPEND_ENTRIES);
+
+            std::size_t bytes = 0;
+
+            for(std::uint64_t index = next ; index <= last ; index++)
+            {
+                LogEntry entry;
+
+                if(!log_->entry_at(index,entry))
+                {
+                    error = "build append : cannot read entry";
+                    return false;
+                }
+
+                const std::size_t size = entry.command.size();
+
+                //超过 1 MiB 就给下一批
+                if(!request.entries.empty() && size > MAX_APPEND_COMMAND_BYTES - bytes)
+                {
+                    break;
+                }
+
+                request.entries.push_back(std::move(entry));
+                bytes += size;
+
+                if(request.entries.size() >= MAX_APPEND_ENTRIES || bytes >= MAX_APPEND_COMMAND_BYTES)
+                {
+                    break;
+                }
+
+            }
+        }
+
+        out = std::move(request);
+        return true;
+    }
+    catch(const std::exception& ex)
+    {
+        error = std::string("build append : ") + ex.what();
+        return false;
+    }
+
+}
+
+//收到 leader 的日志请求，判断是否接 是否删/加 哪些日志
+bool RaftCore::handle_append_entries(std::uint64_t from,const AppendEntriesRequest& request,AppendEntriesOut& out,std::string& error)
+{
+    error.clear();
+
+    if(!good())
+    {
+        error = "append entris : core not ready";
+        return false;
+    }
+
+    if(log_ == nullptr)
+    {
+        error = "append entris : no log view";
+        return false;
+    }
+
+    if(from == self_id_ || std::find(members_.begin(),members_.end(),from) == members_.end())
+    {
+        error = "append entris : sender is not another member";
+        return false;
+    }
+
+    if(request.leader_id != from)
+    {
+        error = "append entris : leader id mismatch";
+        return false;
+    }
+
+    if(request.term == 0)
+    {
+        error = "append entries : zero term";
+        return false;
+    }
+
+    //同任期还有另一个leader 说明集群状态不对，则不更改任何
+    if(request.term == hard_state_.current_term && role_ == Role::Leader)
+    {
+        error = "append entris : another leader in same term";
+        return false;
+    }
+
+    AppendEntriesOut result;
+
+    result.term = hard_state_.current_term;
+
+    //发送方任期比自己小 直接拒绝
+    if(request.term < hard_state_.current_term)
+    {
+        out = std::move(result);
+        return true;
+    }
+
+    //发送方任期更大 退位 清理投票记录
+    if(request.term > hard_state_.current_term)
+    {
+        hard_state_.current_term = request.term;
+        hard_state_.voted_for = 0;
+
+        role_ = Role::Follower;
+        votes_.clear();
+
+        result.term = hard_state_.current_term;
+        result.hard_state = hard_state_;
+    }
+    else if(role_ == Role::Candidate)
+    {
+        role_ = Role::Follower;
+        votes_.clear();
+    }
+
+    result.reset_election_timer = true;
+
+    const std::uint64_t last = log_->last_index();
+
+    if(request.prev_log_index > last)
+    {
+        out = std::move(result);
+        return true;
+    }
+
+    //核对前一条的任期 第 0 条按 0 算
+    if(request.prev_log_index != 0)
+    {
+        std::uint64_t local_term = 0;
+
+        if(!log_->term_at(request.prev_log_index,local_term))
+        {
+            error = "append entries : cannot read previous term";
+            return false;
+        }
+
+        if(local_term != request.prev_log_term)
+        {
+            out = std::move(result);
+            return true;
+        }
+    }
+
+    std::uint64_t conflict = 0;
+
+    for(std::size_t i = 0 ; i < request.entries.size() ; i++)
+    {
+        const std::uint64_t index = request.prev_log_index+1+i;
+
+        if(index > last)
+        {
+            conflict = index;
+            break;
+        }
+
+        std::uint64_t local_term = 0;
+        log_->term_at(index,local_term);
+
+        if(local_term != request.entries[i].term)
+        {
+            if(index <= commit_index_)
+            {
+                error = "append entries : conflict below commit index";
+                return false;
+            }
+
+            conflict = index;
+            break;
+        }
+    }
+
+
+    if(conflict != 0)
+    {
+        result.truncate_from = conflict;
+
+        for(std::size_t i = 0 ; i < request.entries.size() ; i++)
+        {
+            LogEntry entry = request.entries[i];
+
+            entry.index = request.prev_log_index+1+i;
+
+            if(entry.index >= conflict)
+            {
+                result.entries.push_back(std::move(entry));
+            }
+        }
+    }
+
+    result.accept = true;
+    out = std::move(result);
+    return true;
+
+}
+
 
 
 

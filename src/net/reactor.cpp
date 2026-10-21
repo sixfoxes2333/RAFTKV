@@ -118,7 +118,7 @@ bool Reactor::add_connection(int fd,std::unique_ptr<Connection>conn,u_int32_t ev
 
 void Reactor::request_close(Connection* c)
 {
-    if(c == nullptr || c->closing())
+    if(c->closing())
     {
         return; //重复申请直接返回
     }

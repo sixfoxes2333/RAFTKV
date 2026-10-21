@@ -111,3 +111,19 @@ add_executable(test_raft_election
     tests/test_raft_election.cpp
     src/raft/core.cpp)
 target_include_directories(test_raft_election PRIVATE src)
+
+# Raft Core：日志复制请求的打包与接收（内存日志，无 socket、无磁盘）
+add_executable(test_raft_append
+    tests/test_raft_append.cpp
+    src/raft/core.cpp)
+target_include_directories(test_raft_append PRIVATE src)
+
+# Raft 复制落地：真实 LogStore/StateStore 执行日志动作并生成回复
+add_executable(test_raft_append_persist
+    tests/test_raft_append_persist.cpp
+    src/raft/core.cpp
+    src/raft/apply.cpp
+    src/raft/state.cpp
+    src/raft/logstore.cpp
+    src/storage/record.cpp)
+target_include_directories(test_raft_append_persist PRIVATE src)

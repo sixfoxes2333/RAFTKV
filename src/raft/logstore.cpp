@@ -331,7 +331,7 @@ namespace raft
                 return false;
             }
 
-            if(!S_ISREG(st.st_mode) || st.st_size < 0)
+            if(!S_ISREG(st.st_mode))
             {
                 error = "raft.log must be a regular file";
                 return false;
