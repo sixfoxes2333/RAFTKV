@@ -83,6 +83,8 @@ echo "[ASan] 运行 Raft 日志复制打包/接收测试"
 run_bin test_raft_append
 echo "[ASan] 运行 Raft 复制落地测试（真实 LogStore/StateStore）"
 run_bin test_raft_append_persist
+echo "[ASan] 运行 Raft 复制回复/追平测试（内存日志/保存模型）"
+run_bin test_raft_append_response
 
 # ---- 3. 网络场景：背压（写满 → EAGAIN → 短写续写），必须真的跑起来 ----
 export KV_SERVER="$BUILD/kvserver"

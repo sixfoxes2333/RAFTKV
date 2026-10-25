@@ -288,6 +288,14 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft 复制回复（成功推进、失败回退、迟到回复、冲突追平）=="
+if ./build/test_raft_append_response; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

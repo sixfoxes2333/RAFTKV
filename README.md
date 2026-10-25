@@ -1,12 +1,13 @@
 # KV — 单节点持久化 KV 存储（C++17 / epoll）
 
 一个从零手写的持久化键值存储服务：epoll 事件循环 + 后台存储线程 + 二进制协议 + Bitcask 风格日志存储。
-支持 `SET` / `GET` / `DEL`，每条写都 `fsync`，进程被 `kill -9` 后重启数据仍在。
+支持 `SET` / `GET` / `DEL`；默认 `always` 模式按批 `fsync` 后确认写入，另有 `everysec/off` 模式。
 
 > 当前状态：**单节点持久化 KV 已封版**（tag `storage-v1.2`）—— 单机存储 + 网络层 + 异步架构 +
-> 批提交（group commit）全部完成；**29 项回归**与 ASan/UBSan 通过，TSan 已验证 Reactor/worker 路径（见 §3/§4）。
-> Raft 的持久化基座与 Core 选举（发起/投票/计票/当选）已接入回归；日志复制、提交推进与网络尚未实现。
-> 下一步：在其上实现 Raft，做成 3 副本的 RaftKV。
+> 批提交（group commit）全部完成；当前普通回归 **32 项**通过，ASan/UBSan runner 通过，历史 TSan 覆盖 Reactor/worker 路径（见 §3/§4）。
+> Raft 已实现持久化基座、Core 选举、复制请求打包、follower 接收/落盘动作和 leader 回复处理（M1–M3 主流程）。
+> **尚未接通真实 Raft 网络、提交推进或 KV apply**；内存演练不是三进程集群验收。
+> 下一步：本地提案与当前任期多数派提交（M4），再完成 Core 综合验收及 transport/Worker/KV 接线。
 
 ```bash
 ./build/kvserver /tmp/db.data &          # 启动（默认 ./kvdb.data）
@@ -280,13 +281,15 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 ## 4. 测试与工具
 
 ```bash
-bash tests/run_all.sh            # 29 项快速回归
+bash tests/run_all.sh            # 32 项普通回归
 bash tests/run_all.sh --slow     # 追加：崩溃注入 + 故障注入 + 慢 fsync 注入
 bash tests/run_all.sh --asan     # 追加：ASan/UBSan（服务器 + 端到端场景）
 bash tests/run_asan.sh           # ASan/UBSan（存储单测 + 背压 + 端到端，检查 sanitizer 输出）
 bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 ./build/kvbench --help           # 压测客户端（见 3.1/3.2 的口径）
 ```
+
+10/22 验证：第二轮完整普通回归 32 项通过，ASan/UBSan runner 通过（含 M3 回复测试）。首轮批提交吞吐比例未达阈值，原阈值独立复跑及第二轮整套通过，原因尚未定位；性能阈值不是环境无关保证。ASan runner 不运行全部普通用例，且关闭 LeakSanitizer；本轮未重跑 TSan。
 
 | 文件 | 作用 |
 |---|---|
@@ -311,6 +314,9 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 | `tests/test_logstore.cpp` `logstore_fault_test.py` | Raft 日志存储：追加/读取/截断/恢复、残尾修复与完整损坏拒绝、pwrite/fsync/ftruncate 失败、批 fsync 计数与调用顺序 |
 | `tests/test_raft_core.cpp` `test_raft_core_alloc.cpp` | Core 初始化与发起选举：任期边界、自投票、目标列表、角色与一次性分配失败 |
 | `tests/test_raft_election.cpp` | 内存三节点选举演练：选主 / 分票 / 更高任期退位 / 重复票去重 / 少数派无法当选 |
+| `tests/test_raft_append.cpp` | M1/M2 内存演练：打包上限、前一条匹配、冲突和追加动作 |
+| `tests/test_raft_append_persist.cpp` | M2 真实 LogStore/StateStore 基本执行：存任期、截断/追加、失败停止、日志重开；不是 KV apply |
+| `tests/test_raft_append_response.cpp` | M3 九组：原批次确认范围、回退/迟到/重复回复、高任期输出、成员隔离及多批追平；使用内存日志和保存模型 |
 | `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync/epoll_ctl/pwrite/pread 失败、短写、慢 fsync） |
 
 两个测试工程上的约定：
@@ -363,7 +369,7 @@ CMakeLists.txt
 
 1. ~~**group commit**~~ ✅ 已完成（`storage-v1.2`）：一次 fsync 提交一批，写入 170 → 10 281 ops/s
    （`always`）/ 98 210 ops/s（`everysec`），单条延迟不变（见 §2.10 / §3.1）。
-2. **Raft**：leader 选举、日志复制、持久化 `currentTerm/votedFor/log`、apply 到本存储。
+2. **Raft**：持久化基座、选举与 M1–M3 Core 主流程已有测试；接下来完成提案/提交、Core 综合验收、非阻塞 transport、RaftWorker、KV apply/一致恢复及真实三节点验收。
 3. 可靠性验证：网络分区/丢包/重排、客户端请求去重、线性一致性检查。
 4. 快照与日志压缩；ReadIndex / Lease Read 优化只读。
 5. 多 Reactor（提高读上限）与存储引擎接口化 + compaction，必要时对比 LSM 后端。

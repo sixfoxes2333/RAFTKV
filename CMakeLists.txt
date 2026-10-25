@@ -127,3 +127,9 @@ add_executable(test_raft_append_persist
     src/raft/logstore.cpp
     src/storage/record.cpp)
 target_include_directories(test_raft_append_persist PRIVATE src)
+
+# M3：leader 处理复制回复；内存日志/保存模型，不使用 socket
+add_executable(test_raft_append_response
+    tests/test_raft_append_response.cpp
+    src/raft/core.cpp)
+target_include_directories(test_raft_append_response PRIVATE src)

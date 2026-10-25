@@ -760,7 +760,81 @@ bool RaftCore::handle_append_entries(std::uint64_t from,const AppendEntriesReque
 }
 
 
+bool RaftCore::handle_append_entries_response(std::uint64_t from,const AppendEntriesRequest& sent,const AppendEntriesResponse& response,AppendResponseOut& out,std::string& error)
+{
+    error.clear();
 
+    if(!good())
+    {
+        error = "append response : core not ready";
+        return false;
+    }
+    //找到回复节点
+    const auto it = std::find(members_.begin(),members_.end(),from);
+
+    if(from == self_id_ || it == members_.end())
+    {
+        error = "append response : sender is not another member";
+        return false;
+    }
+
+    //准备本次输出
+    AppendResponseOut result;
+
+    //先处理更高任期
+    if(response.term > hard_state_.current_term)
+    {
+        hard_state_ = {response.term,0};
+
+        role_ = Role::Follower;
+        votes_.clear();
+
+        result.hard_state = hard_state_;
+        out = std::move(result);
+        return true;
+    }
+
+    if(role_ != Role::Leader || response.term != hard_state_.current_term || sent.term != hard_state_.current_term)
+    {
+        out = std::move(result);
+        return true;
+    }
+
+    if(sent.leader_id != self_id_ || sent.prev_log_index > last_log_index_ || sent.entries.size() > last_log_index_ - sent.prev_log_index)
+    {
+        error = "append response: invalid sent request";
+        return false;
+    }
+
+    const std::uint64_t sent_last = sent.prev_log_index + sent.entries.size();
+
+    if(sent_last == std::numeric_limits<std::uint64_t>::max())
+    {
+        error = "append response : next index would overflow";
+        return false;
+    }
+
+    //换算回复节点的下标
+    const std::size_t slot = static_cast<std::size_t>(it-members_.begin());
+
+    if(response.success)
+    {
+        if(sent_last > match_index_[slot])
+        {
+            match_index_[slot] = sent_last;
+            next_index_[slot] = sent_last + 1;
+        }
+    }
+    else if(sent.prev_log_index + 1 == next_index_[slot] && sent.prev_log_index > match_index_[slot])
+    {
+        next_index_[slot]--;
+        result.retry = true;
+    }
+
+    out = std::move(result);
+    return true;
+
+}
 
 
 }//namespace raft

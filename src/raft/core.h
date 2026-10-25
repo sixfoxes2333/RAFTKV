@@ -149,6 +149,16 @@ struct AppendEntriesOut
 
 };
 
+//leader 处理日志回复
+struct AppendResponseOut
+{   
+    //对方任期更高则本机退位，保存新 term/vote
+    std::optional<HardState>hard_state{};
+
+    //失败则导致发送位置回退
+    bool retry = false;
+};
+
 
 class RaftCore
 {
@@ -208,6 +218,9 @@ public:
     //给 peer 打包一份日志复制请求
     bool build_append_entries(std::uint64_t peer,AppendEntriesRequest& out,std::string& error)const;
 
+    //处理日志回复请求
+    //sent 是本机当时发给 from 的请求
+    bool handle_append_entries_response(std::uint64_t from,const AppendEntriesRequest& sent,const AppendEntriesResponse& response,AppendResponseOut& out,std::string& error);
 
 
 private:
