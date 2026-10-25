@@ -133,3 +133,29 @@ add_executable(test_raft_append_response
     tests/test_raft_append_response.cpp
     src/raft/core.cpp)
 target_include_directories(test_raft_append_response PRIVATE src)
+
+# M4 第一步：提案构造、保存后同步，以及复用M1–M3的真实存储闭环
+add_executable(test_raft_proposal
+    tests/test_raft_proposal.cpp
+    src/raft/core.cpp
+    src/raft/apply.cpp
+    src/raft/state.cpp
+    src/raft/logstore.cpp
+    src/storage/record.cpp)
+target_include_directories(test_raft_proposal PRIVATE src)
+
+# M4 第二步：从已确认的副本进度判断leader能提交到哪里
+add_executable(test_raft_commit
+    tests/test_raft_commit.cpp
+    src/raft/core.cpp)
+target_include_directories(test_raft_commit PRIVATE src)
+
+# M4 follower提交与完整提交通知：真实存储，测试按顺序驱动Core
+add_executable(test_raft_follower_commit
+    tests/test_raft_follower_commit.cpp
+    src/raft/core.cpp
+    src/raft/apply.cpp
+    src/raft/state.cpp
+    src/raft/logstore.cpp
+    src/storage/record.cpp)
+target_include_directories(test_raft_follower_commit PRIVATE src)

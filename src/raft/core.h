@@ -159,6 +159,14 @@ struct AppendResponseOut
     bool retry = false;
 };
 
+//本次新增的已提交区间 都为 0 则无新增提交
+//允许第 XX 到 XX 条执行
+struct CommitOut
+{
+    std::uint64_t committed_from = 0;
+    std::uint64_t committed_to = 0;
+};
+
 
 class RaftCore
 {
@@ -208,6 +216,15 @@ public:
 
     //日志写成功后调用
     bool on_log_persisted(std::string& error);
+
+    //讲一条命令组装为待保存的日志
+    bool build_proposal(const std::string& command,LogEntry& out,std::string& error)const;
+
+    //leader 检查多数派进度，更新 commitIndex 并输出新增已提交区间
+    bool advance_commit(CommitOut& out,std::string& error);
+
+    //请求被接受，日志保存成功后调用
+    bool advance_follower_commit(const AppendEntriesRequest& accepted_request,CommitOut& out,std::string& error);
 
     //下一条准备发给某个节点的是第几条
     std::uint64_t next_index(std::uint64_t peer)const;

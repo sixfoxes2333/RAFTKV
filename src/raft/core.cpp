@@ -482,6 +482,186 @@ std::uint64_t RaftCore::match_index(std::uint64_t peer)const
     return 0;
 }
 
+bool RaftCore::build_proposal(const std::string& command,LogEntry& out,std::string& error)const
+{
+    error.clear();
+
+    if(!good() || role_ != Role::Leader)
+    {
+        error = "build proposal : core is not a leader";
+        return false;
+    }
+
+    //保存成功后，on_log_persisted 通过本视图同步本机尾部
+    if(log_ == nullptr)
+    {
+        error = "build proposal : no log view";
+        return false;
+    }
+
+    if(last_log_index_ >= std::numeric_limits<std::uint64_t>::max()-1)
+    {
+        error = "build proposal : log index exhausted";
+        return false;
+    }
+
+    if(command.size() > LogStore::MAX_COMMAND_SIZE)
+    {
+        error = "build proposal : command too large";
+        return false;
+    }
+
+    try
+    {
+        LogEntry entry;
+        entry.index = last_log_index_ + 1;
+        entry.term = hard_state_.current_term;
+        entry.command = command;
+
+        out = std::move(entry);
+        return true;
+    }
+    catch(const std::exception &ex)
+    {
+        error = std::string("build proposal: ") + ex.what();
+        return false;
+    }
+    
+}
+
+bool RaftCore::advance_commit(CommitOut& out,std::string& error)
+{
+    error.clear();
+
+    if(!good() || role_ != Role::Leader)
+    {
+        error = "advance commit : core is not a leader";
+        return false;
+    }
+
+    if(log_ == nullptr)
+    {
+        error = "advance commit : no log view";
+        return false;
+    }
+
+    CommitOut result;
+    //此处 candidate 为暂定日志编号
+    std::uint64_t candidate = commit_index_;
+
+    for(const std::uint64_t index : match_index_)
+    {
+        if(index <= candidate)
+        {
+            continue;
+        }
+
+        std::size_t count = 0;
+        for(const std::uint64_t matched : match_index_)
+        {
+            if(matched >= index)
+            {
+                count++;
+            }
+        }
+
+        if(count >= majority_)
+        {
+            candidate = index;
+        }
+    }
+
+    if(candidate == commit_index_)
+    {
+        out = result;
+        return true;
+    }
+
+    if(candidate > last_log_index_)
+    {
+        error = "advance commit : confirmed index beyond local log";
+        return false;
+    }
+
+    std::uint64_t term = 0;
+    //查询日志创建时的任期
+    if(!log_->term_at(candidate,term))
+    {
+        error = "advance commit : cannot read candidate term";
+        return false;
+    }
+
+    if(term != hard_state_.current_term)
+    {
+        out = result;
+        return true;
+    }
+
+    result.committed_from = commit_index_ + 1;
+    result.committed_to = candidate;
+    commit_index_ = candidate;
+    out = result;
+    return true;
+
+}
+
+
+bool RaftCore::advance_follower_commit(const AppendEntriesRequest& accepted_request,CommitOut& out,std::string& error)
+{
+    error.clear();
+
+    if(!good() || role_ != Role::Follower)
+    {
+        error = "follower commit : core is not a follower";
+        return false;
+    }
+
+    if(log_ == nullptr)
+    {
+        error = "follower commit : no log view";
+        return false;
+    }
+
+    if(accepted_request.term != hard_state_.current_term)
+    {
+        error = "follower commit : request term mismatch";
+        return false;
+    }
+
+    const auto max_index = std::numeric_limits<std::uint64_t>::max();
+
+    if(accepted_request.entries.size() > max_index - accepted_request.prev_log_index)
+    {
+        error = "follower commit : match index overflow";
+        return false;
+    }
+
+    const std::uint64_t matched_last = accepted_request.prev_log_index + accepted_request.entries.size();
+
+    //Core 记住的已保存尾部还没到此 不算作本次保存完成
+    if(matched_last > last_log_index_)
+    {
+        error = "follower commit : matched index beyond saved log";
+        return false;
+    }
+
+    CommitOut result;
+
+    const std::uint64_t next_commit = std::min(accepted_request.leader_commit,matched_last);
+
+    if(next_commit <= commit_index_)
+    {
+        out = result;
+        return true;
+    }
+
+    result.committed_from = commit_index_ + 1;
+    result.committed_to = next_commit;
+    commit_index_ = next_commit;
+    out = result;
+    return true;
+
+}
 
 //给 peer 打包请求，next_index 是下一条准备发给它的位置
 bool RaftCore::build_append_entries(std::uint64_t peer,AppendEntriesRequest& out,std::string& error)const
@@ -835,6 +1015,8 @@ bool RaftCore::handle_append_entries_response(std::uint64_t from,const AppendEnt
     return true;
 
 }
+
+
 
 
 }//namespace raft

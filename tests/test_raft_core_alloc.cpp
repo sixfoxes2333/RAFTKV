@@ -107,11 +107,51 @@ void test_single_no_alloc() {
     CHECK(out.hard_state.current_term == 1 && out.hard_state.voted_for == 1);
     std::cout << "PASS single-node start requires no new vector allocation\n";
 }
+
+class EmptyLog final : public raft::LogView {
+public:
+    std::uint64_t last_index() const override { return 0; }
+    bool term_at(std::uint64_t,std::uint64_t&) const override { return false; }
+    bool entry_at(std::uint64_t,raft::LogEntry&) const override { return false; }
+};
+
+void test_proposal_alloc() {
+    EmptyLog log;
+    raft::RaftCore core;
+    std::string error;
+    error.reserve(256);
+    CHECK(core.attach_log(&log,error));
+    CHECK(core.init(1,{1,2,3},{2,0},0,0,error));
+    raft::ElectionOutPut election;
+    CHECK(core.start_election(election,error));
+    // 本内存测试在投票回复前视作已消费选举HardState保存动作。
+    const auto saved = election.hard_state;
+    raft::VoteCountOutPut vote;
+    CHECK(core.handle_vote_response(2,{saved.current_term,true},vote,error) && vote.become_leader);
+    const std::string command(1024,'v'); // 超过SSO，复制命令必须分配。
+    raft::LogEntry out{90,91,"keep original output"};
+    const auto before = out;
+    hits = 0;
+    fail_after = 0;
+    const bool ok = core.build_proposal(command,out,error);
+    fail_after = -1;
+    CHECK(!ok && hits == 1 && !error.empty());
+    CHECK(out.index == before.index && out.term == before.term && out.command == before.command);
+    CHECK(core.good() && core.role() == raft::Role::Leader);
+    CHECK(core.hard_state().current_term == saved.current_term && core.hard_state().voted_for == 1);
+    CHECK(core.match_index(1) == 0 && core.match_index(2) == 0 && core.next_index(2) == 1);
+    CHECK(core.build_proposal(command,out,error));
+    CHECK(error.empty() && out.index == 1 && out.term == saved.current_term && out.command == command);
+    CHECK(core.match_index(1) == 0 && log.last_index() == 0);
+    std::cout << "PASS proposal command-copy allocation failure: original out/core retained; retry uses same index\n";
+}
+
 } // namespace
 
 int main() {
     test_init_alloc();
     test_start_alloc();
     test_single_no_alloc();
+    test_proposal_alloc();
     std::cout << "raft core one-shot allocation fault tests PASS\n";
 }

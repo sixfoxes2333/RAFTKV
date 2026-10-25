@@ -296,6 +296,30 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft 本地提案（组装不预占、大小边界、保存同步及复制闭环）=="
+if ./build/test_raft_proposal; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft leader提交（多数派、当前任期、连续区间、读取失败）=="
+if ./build/test_raft_commit; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft follower提交（匹配范围上限、保存失败、完整提交通知）=="
+if ./build/test_raft_follower_commit; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :
