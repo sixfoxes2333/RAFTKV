@@ -7,7 +7,7 @@
 > 批提交（group commit）全部完成；10/25 M5本轮完整普通回归 **36项通过**，配置的ASan/UBSan runner复测通过（不是全部36项都运行sanitizer；中途启动探测失败记录见§4）。本轮未重跑TSan。
 > Raft 已实现持久化基座、Core选举/复制/提交（M1–M4），并通过M5本轮确定性组合验收。
 > **真实transport/RaftWorker/已提交KV执行尚未接通**；测试进程中的Core对象投递，不是三进程集群验收。
-> M5新增真实存储与可控消息队列的12组场景，R4查询失败传播已由用户修复并通过红→绿；其他复审待办未自动关闭。下一步M6。见[调用图](docs/raft-core-flow.md)与[验收边界/日志](docs/raft-core-acceptance.md)。
+> M5新增真实存储与可控消息队列的12组场景，R4查询失败传播已由用户修复并通过红→绿；其他复审待办未自动关闭。下一步M6。
 
 ```bash
 ./build/kvserver /tmp/db.data &          # 启动（默认 ./kvdb.data）
@@ -293,7 +293,7 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 
 10/25 M4验收：完整普通35项一次通过，配置的ASan/UBSan runner通过（含M4、背压、单节点E2E）。提案7组、leader提交12组、follower提交9组；leader用例新增五Core多轮换届的Figure8类轨迹，保存用内存模型；follower用例使用真实StateStore/LogStore，包含三个Core对象两轮提交通知。均非真实网络集群。保存失败覆盖目录失效和保存后term查询失败，未声称复合pwrite/fsync故障已穷尽。分配失败目标只跑普通测试，LeakSanitizer关闭，本轮未跑TSan。
 
-10/25 M5验收：最新完整普通36项通过；新Core队列场景12组、follower/R4共10组均普通与ASan/UBSan通过。覆盖隔离换届、少数派不提交、64+64+2追平、旧回复配对、真实文件重开并重建Core等，不含TCP/生产Worker/KV apply。配置ASan runner中途有一次背压启动探测失败（各单元目标均通过，保留日志，后来服务器日志出现bind失败），原配置复测通过；占用/启动时序根因未确诊，未改阈值。详见[完整验收记录](docs/raft-core-acceptance.md)。
+10/25 M5验收：最新完整普通36项通过；新Core队列场景12组、follower/R4共10组均普通与ASan/UBSan通过。覆盖隔离换届、少数派不提交、64+64+2追平、旧回复配对、真实文件重开并重建Core等，不含TCP/生产Worker/KV apply。配置ASan runner中途有一次背压启动探测失败（各单元目标均通过，保留日志，后来服务器日志出现bind失败），原配置复测通过；占用/启动时序根因未确诊，未改阈值。
 
 | 文件 | 作用 |
 |---|---|
