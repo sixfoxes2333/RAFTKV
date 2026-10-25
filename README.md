@@ -4,10 +4,10 @@
 支持 `SET` / `GET` / `DEL`；默认 `always` 模式按批 `fsync` 后确认写入，另有 `everysec/off` 模式。
 
 > 当前状态：**单节点持久化 KV 已封版**（tag `storage-v1.2`）—— 单机存储 + 网络层 + 异步架构 +
-> 批提交（group commit）全部完成；10/25本轮完整普通回归 **35项通过**，配置的ASan/UBSan runner通过（不等于全部35项都运行sanitizer，见§4）。历史TSan覆盖Reactor/worker路径，本轮未重跑。
-> Raft 已实现持久化基座、Core 选举、复制请求打包、follower 接收/落盘动作和 leader 回复处理（M1–M3 主流程）。
-> **尚未接通真实Raft网络、完整提交接线或KV apply**；Core对象间的内存投递不是三进程集群验收。
-> M4的Core功能已通过本轮验收：本地提案、leader当前任期多数派提交、follower有界提交，以及测试驱动的提交通知链路。下一步M5综合收口；真实transport/RaftWorker/KV apply仍未接通。
+> 批提交（group commit）全部完成；10/25 M5本轮完整普通回归 **36项通过**，配置的ASan/UBSan runner复测通过（不是全部36项都运行sanitizer；中途启动探测失败记录见§4）。本轮未重跑TSan。
+> Raft 已实现持久化基座、Core选举/复制/提交（M1–M4），并通过M5本轮确定性组合验收。
+> **真实transport/RaftWorker/已提交KV执行尚未接通**；测试进程中的Core对象投递，不是三进程集群验收。
+> M5新增真实存储与可控消息队列的12组场景，R4查询失败传播已由用户修复并通过红→绿；其他复审待办未自动关闭。下一步M6。见[调用图](docs/raft-core-flow.md)与[验收边界/日志](docs/raft-core-acceptance.md)。
 
 ```bash
 ./build/kvserver /tmp/db.data &          # 启动（默认 ./kvdb.data）
@@ -281,7 +281,7 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 ## 4. 测试与工具
 
 ```bash
-bash tests/run_all.sh            # 35 项普通回归
+bash tests/run_all.sh            # 36 项普通回归
 bash tests/run_all.sh --slow     # 追加：崩溃注入 + 故障注入 + 慢 fsync 注入
 bash tests/run_all.sh --asan     # 追加：ASan/UBSan（服务器 + 端到端场景）
 bash tests/run_asan.sh           # ASan/UBSan（存储单测 + 背压 + 端到端，检查 sanitizer 输出）
@@ -292,6 +292,8 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 10/22 验证：第二轮完整普通回归 32 项通过，ASan/UBSan runner 通过（含 M3 回复测试）。首轮批提交吞吐比例未达阈值，原阈值独立复跑及第二轮整套通过，原因尚未定位；性能阈值不是环境无关保证。ASan runner 不运行全部普通用例，且关闭 LeakSanitizer；本轮未重跑 TSan。
 
 10/25 M4验收：完整普通35项一次通过，配置的ASan/UBSan runner通过（含M4、背压、单节点E2E）。提案7组、leader提交12组、follower提交9组；leader用例新增五Core多轮换届的Figure8类轨迹，保存用内存模型；follower用例使用真实StateStore/LogStore，包含三个Core对象两轮提交通知。均非真实网络集群。保存失败覆盖目录失效和保存后term查询失败，未声称复合pwrite/fsync故障已穷尽。分配失败目标只跑普通测试，LeakSanitizer关闭，本轮未跑TSan。
+
+10/25 M5验收：最新完整普通36项通过；新Core队列场景12组、follower/R4共10组均普通与ASan/UBSan通过。覆盖隔离换届、少数派不提交、64+64+2追平、旧回复配对、真实文件重开并重建Core等，不含TCP/生产Worker/KV apply。配置ASan runner中途有一次背压启动探测失败（各单元目标均通过，保留日志，后来服务器日志出现bind失败），原配置复测通过；占用/启动时序根因未确诊，未改阈值。详见[完整验收记录](docs/raft-core-acceptance.md)。
 
 | 文件 | 作用 |
 |---|---|
@@ -321,7 +323,8 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 | `tests/test_raft_append_response.cpp` | M3 九组：原批次确认范围、回退/迟到/重复回复、高任期输出、成员隔离及多批追平；使用内存日志和保存模型 |
 | `tests/test_raft_proposal.cpp` | M4第1步：构造不预占编号、命令/索引边界、真实保存/同步、复用M1–M3的双Core真实存储闭环；没有提交推进或KV apply |
 | `tests/test_raft_commit.cpp` | leader提交12组：多数派/当前任期、连续区间、退位重选、读取失败、红→绿及五Core的Figure8类覆盖轨迹；内存保存模型 |
-| `tests/test_raft_follower_commit.cpp` | follower提交9组：原请求匹配范围、心跳/重复/冲突、错误回调、真实存储失败门禁及3个Core对象的完整提交通知；无socket/Worker/KV apply |
+| `tests/test_raft_follower_commit.cpp` | follower提交原9组+M5 R4读失败围栏：原请求范围、真实存储失败门禁、3个Core提交通知；无socket/生产Worker/KV apply |
+| `tests/test_raft_core_scenarios.cpp` | M5共12组：3/5节点可控消息队列、重复/丢失/乱序、隔离重选/少数派、分批追平、真实存储重开和新Core；含跨事件不变量检查 |
 | `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync/epoll_ctl/pwrite/pread 失败、短写、慢 fsync） |
 
 两个测试工程上的约定：
@@ -374,7 +377,7 @@ CMakeLists.txt
 
 1. ~~**group commit**~~ ✅ 已完成（`storage-v1.2`）：一次 fsync 提交一批，写入 170 → 10 281 ops/s
    （`always`）/ 98 210 ops/s（`everysec`），单条延迟不变（见 §2.10 / §3.1）。
-2. **Raft**：持久化基座、选举和M1–M4 Core功能已通过各阶段测试；下一步M5综合验收，再实现非阻塞transport、RaftWorker、KV apply/一致恢复和真实三节点故障验收。
+2. **Raft**：持久化基座、选举/复制/提交与M5本轮Core综合验收已过；下一步M6非阻塞transport（先完成RPC边界验证），再接RaftWorker、KV apply/一致恢复和真实三节点故障验收。
 3. 可靠性验证：网络分区/丢包/重排、客户端请求去重、线性一致性检查。
 4. 快照与日志压缩；ReadIndex / Lease Read 优化只读。
 5. 多 Reactor（提高读上限）与存储引擎接口化 + compaction，必要时对比 LSM 后端。

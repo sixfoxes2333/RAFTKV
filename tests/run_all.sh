@@ -320,6 +320,14 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft Core综合场景（消息队列、隔离换届、旧回复、真实存储重启）=="
+if ./build/test_raft_core_scenarios; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

@@ -900,7 +900,11 @@ bool RaftCore::handle_append_entries(std::uint64_t from,const AppendEntriesReque
         }
 
         std::uint64_t local_term = 0;
-        log_->term_at(index,local_term);
+        if(!log_->term_at(index,local_term))
+        {
+            error = "append entries : cannot read local term";
+            return false;
+        }
 
         if(local_term != request.entries[i].term)
         {

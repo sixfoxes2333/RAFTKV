@@ -91,6 +91,8 @@ echo "[ASan] 运行 leader提交测试（当前任期多数派与新增区间）
 run_bin test_raft_commit
 echo "[ASan] 运行 follower提交/真实存储提交通知测试"
 run_bin test_raft_follower_commit
+echo "[ASan] 运行 Core综合场景（可控消息队列/真实存储重启；非TCP集群）"
+run_bin test_raft_core_scenarios
 
 # ---- 3. 网络场景：背压（写满 → EAGAIN → 短写续写），必须真的跑起来 ----
 export KV_SERVER="$BUILD/kvserver"

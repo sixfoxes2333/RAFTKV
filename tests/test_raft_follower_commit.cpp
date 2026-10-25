@@ -397,6 +397,33 @@ void test_real_commit_notice_roundtrip() {
     CHECK(leader.log.last_index() == 2 && follower.log.last_index() == 2 && lagger.log.last_index() == 2);
     std::cout << "PASS real stores/3 Core objects: propose-save-ACK-leader commit-notice-follower commit, two rounds\n";
 }
+
+void test_m5_existing_term_read_failure_must_not_be_a_conflict() {
+    Node node(2,3);
+    auto request = make(0,0,2);
+    request.entries = {{1,2,"old1"},{2,2,"old2"}};
+    // 两条内容本来都一致，第3条应保留。这里只注入视图的第1条term查询失败，
+    // 不是把第1条改成另一任期，也不是模拟真实文件层pwrite/fsync失败。
+    node.view.fail_term_at = 1;
+    const auto failed = deliver(node,request);
+    if(failed.handled || failed.response.success || failed.commit_called) {
+        std::cerr << "M5 term_at(1)=false: handled=" << failed.handled
+                  << " success=" << failed.response.success
+                  << " commit_called=" << failed.commit_called
+                  << " committed_to=" << failed.committed.committed_to
+                  << " log_last=" << node.log.last_index() << '\n';
+    }
+    // 读不到本地term就报错，不能编造冲突、删除后缀，再回成功。
+    CHECK(!failed.handled);
+    CHECK(!failed.reply_ready && !failed.response.success && !failed.commit_called);
+    CHECK(!node.core.good()); // 测试外层按运行期查询错误停止本轮协议处理。
+    CHECK(node.log.last_index() == 3);
+    LogEntry last;
+    CHECK(node.log.get(3,last,node.error));
+    CHECK(last.term == 2 && last.command == "old3");
+    std::cout << "PASS M5 existing-entry term query failure stops before conflict actions/reply/commit\n";
+}
+
 } // namespace
 
 int main() {
@@ -409,5 +436,6 @@ int main() {
     test_state_save_failure_releases_nothing();
     test_saved_log_but_tail_read_failure_releases_nothing();
     test_real_commit_notice_roundtrip();
+    test_m5_existing_term_read_failure_must_not_be_a_conflict();
     std::cout << "raft follower-commit tests PASS (real stores + test-driven Core calls; no sockets/Worker/KV apply)\n";
 }

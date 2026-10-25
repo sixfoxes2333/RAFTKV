@@ -159,3 +159,14 @@ add_executable(test_raft_follower_commit
     src/raft/logstore.cpp
     src/storage/record.cpp)
 target_include_directories(test_raft_follower_commit PRIVATE src)
+
+
+# M5：可控消息队列、3/5 Core对象、真实Raft存储重启与发布顺序
+add_executable(test_raft_core_scenarios
+    tests/test_raft_core_scenarios.cpp
+    src/raft/core.cpp
+    src/raft/apply.cpp
+    src/raft/state.cpp
+    src/raft/logstore.cpp
+    src/storage/record.cpp)
+target_include_directories(test_raft_core_scenarios PRIVATE src)
