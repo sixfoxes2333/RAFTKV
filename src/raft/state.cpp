@@ -1,5 +1,6 @@
 #include "raft/state.h"
 #include "storage/record.h" // 复用 crc 32
+#include "base/be32.h"
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -16,7 +17,7 @@ namespace raft
         constexpr std::size_t STATE_SIZE = 28;
         constexpr std::size_t CRC_OFFSET = 24;
         constexpr std::uint32_t FORMAT_VERSION = 1;
-        using StateBytes = std::array<unsigned char,STATE_SIZE>;
+        using StateBytes = std::array<char,STATE_SIZE>;
 
         class ScopedFd
         {
@@ -71,49 +72,6 @@ namespace raft
 
         //大端整数编解码
 
-        //32 位整数拆成 4 字节
-        void put_u32(unsigned char* out,std::uint32_t value)
-        {
-            for(unsigned i = 0 ; i < 4 ; i++)
-            {
-                out[i] = static_cast<unsigned char>(value >> (24-i*8));
-            }
-        }
-
-        //64 位整数拆成 8 字节
-        void put_u64(unsigned char* out,std::uint64_t value)
-        {
-            for(unsigned i = 0 ; i < 8 ; i++)
-            {
-                out[i] = static_cast<unsigned char>(value >> (56-i*8));
-            }
-        }
-
-        //4 字节 重组为 32 位整数
-        std::uint32_t get_u32(const unsigned char* in)
-        {
-            std::uint32_t value = 0;
-
-            for(unsigned i = 0 ; i < 4 ; i++)
-            {
-                value = (value << 8) | in[i];
-            }
-
-            return value;
-        }
-
-
-        //8 字节 重组为 64 位整数
-        std::uint64_t get_u64(const unsigned char* in)
-        {
-            std::uint64_t value = 0;
-            for(unsigned i = 0 ; i < 8 ; i++)
-            {
-                value = (value << 8) | in[i];
-            }
-
-            return value;
-        }
 
         //编码为固定长度的磁盘记录
         StateBytes encode(const HardState& state)
@@ -121,13 +79,13 @@ namespace raft
             StateBytes bytes{};
 
             std::memcpy(bytes.data(),"RFST",4);
-            put_u32(bytes.data()+4,FORMAT_VERSION);
-            put_u64(bytes.data()+8,state.current_term);
-            put_u64(bytes.data()+16,state.voted_for);
+            kv::put_be32(bytes.data()+4,FORMAT_VERSION);
+            kv::put_be64(bytes.data()+8,state.current_term);
+            kv::put_be64(bytes.data()+16,state.voted_for);
 
             const auto crc = kv::crc32(reinterpret_cast<const char*>(bytes.data()),CRC_OFFSET);
 
-            put_u32(bytes.data() + CRC_OFFSET,crc);
+            kv::put_be32(bytes.data() + CRC_OFFSET,crc);
             return bytes;
         }
 
@@ -271,13 +229,13 @@ namespace raft
             return false;
         }
 
-        if(get_u32(bytes.data() + 4) != FORMAT_VERSION)
+        if(kv::read_be32(bytes.data() + 4) != FORMAT_VERSION)
         {
             error = "unsupported state version: " + path;
             return false;
         }
 
-        const auto expected_crc = get_u32(bytes.data() + CRC_OFFSET);
+        const auto expected_crc = kv::read_be32(bytes.data() + CRC_OFFSET);
 
         const auto actual_crc = kv::crc32(reinterpret_cast<const char*>(bytes.data()),CRC_OFFSET);
 
@@ -290,7 +248,7 @@ namespace raft
         //所有检查通过 更新输出
         const HardState decoded
         {
-            get_u64(bytes.data()+8),get_u64(bytes.data()+16)
+           kv::read_be64(bytes.data()+8),kv::read_be64(bytes.data()+16)
         };
 
         out = decoded;

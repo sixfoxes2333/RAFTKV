@@ -1,4 +1,5 @@
 #include "logstore.h"
+#include "base/be32.h"
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -100,50 +101,6 @@ namespace raft
 
         }
 
-        //编码 uint32_t 编码为 4 字节
-        void put_u32(char* out,std::uint32_t value)
-        {
-            for(int i = 3 ; i >= 0 ; i--)
-            {
-                out[i] = static_cast<char>(value & 0xFFu);
-                value >>= 8;
-            }
-        }
-
-        //编码 uint64_t 编码为 8 字节
-        void put_u64(char* out,std::uint64_t value)
-        {
-            for(int i = 7 ; i >= 0 ; i--)
-            {
-                out[i] = static_cast<char>(value & 0xFFu);
-                value >>= 8;
-            }
-        }
-
-        //解码 4 字节 解码 uint32_t
-        std::uint32_t get_u32(const char* in)
-        {
-            std::uint32_t value = 0;
-            for(int i = 0 ; i < 4 ; i++)
-            {
-                value = (value << 8) | static_cast<unsigned char>(in[i]);
-            }
-
-            return value;
-        }
-
-        //解码 8 字节 解码 uint64_t
-        std::uint64_t get_u64(const char* in)
-        {
-            std::uint64_t value = 0;
-            for(int i = 0 ; i < 8 ; i++)
-            {
-                value = (value << 8) | static_cast<unsigned char>(in[i]);
-            }
-
-            return value;
-        }
-
         struct Header
         {
             std::uint64_t index; //记录逻辑序号
@@ -154,7 +111,7 @@ namespace raft
         //验证并解码一个 Header
         bool decode_header(const char* bytes,Header& out,std::string& error)
         {
-            if(crc32(bytes,28) != get_u32(bytes + 28))
+            if(crc32(bytes,28) != kv::read_be32(bytes + 28))
             {
                 error = "raft.log : header CRC mismatch";
                 return false;
@@ -166,7 +123,7 @@ namespace raft
                 return false;
             }
 
-            if(get_u32(bytes + 4) != FORMAT_VERSION)
+            if(kv::read_be32(bytes + 4) != FORMAT_VERSION)
             {
                 error = "raft.log : unsupported format version";
                 return false;
@@ -174,9 +131,9 @@ namespace raft
 
             Header header
             {
-                get_u64(bytes + 8),
-                get_u64(bytes + 16),
-                get_u32(bytes + 24)
+                kv::read_be64(bytes + 8),
+                kv::read_be64(bytes + 16),
+                kv::read_be32(bytes + 24)
             };
 
             //虚拟初始边界 必须均大于 0
@@ -203,15 +160,15 @@ namespace raft
             bytes.resize(HEADER_SIZE + entry.command.size() + CRC_SIZE);
 
             std::memcpy(bytes.data(),MAGIC,4);
-            put_u32(bytes.data() + 4 , FORMAT_VERSION);
-            put_u64(bytes.data() + 8,entry.index);
-            put_u64(bytes.data() + 16,entry.term);
-            put_u32(bytes.data() + 24,static_cast<std::uint32_t>(entry.command.size()));
-            put_u32(bytes.data() + 28,crc32(bytes.data(),28));
+            kv::put_be32(bytes.data() + 4 , FORMAT_VERSION);
+            kv::put_be64(bytes.data() + 8,entry.index);
+            kv::put_be64(bytes.data() + 16,entry.term);
+            kv::put_be32(bytes.data() + 24,static_cast<std::uint32_t>(entry.command.size()));
+            kv::put_be32(bytes.data() + 28,crc32(bytes.data(),28));
 
             std::memcpy(bytes.data() + HEADER_SIZE,entry.command.data(),entry.command.size());
 
-            put_u32(bytes.data() + HEADER_SIZE + entry.command.size(),crc32(entry.command.data(),entry.command.size()));
+            kv::put_be32(bytes.data() + HEADER_SIZE + entry.command.size(),crc32(entry.command.data(),entry.command.size()));
 
         }
 
@@ -363,7 +320,7 @@ namespace raft
                 return false;
             }
 
-            if(crc32(bytes.data(),size) != get_u32(bytes.data() + size))
+            if(crc32(bytes.data(),size) != kv::read_be32(bytes.data() + size))
             {
                 error = "raft.log: command CRC mismatch";
                 return false;

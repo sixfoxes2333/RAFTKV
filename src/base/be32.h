@@ -27,6 +27,40 @@ namespace kv
         return ntohl(be);
     }
 
+
+    // 把 32 位按大端写进已经分配好的缓冲
+    inline void put_be32(char* out,std::uint32_t v)
+    {
+        for(int i = 3 ; i >= 0 ; i--)
+        {
+            out[i] = static_cast<char>(v & 0xffu);
+            v >>= 8;
+        }
+    }
+
+    // 把 64 位按大端写进已经分配好的缓冲
+    inline void put_be64(char* out,std::uint64_t v)
+    {
+        for(int i = 7 ; i >= 0 ; i--)
+        {
+            out[i] = static_cast<char>(v & 0xffu);
+            v >>= 8;
+        }
+    }
+
+    // 从 4/8 个字节还原整数
+    inline std::uint64_t read_be64(const char* p)
+    {
+        std::uint64_t v = 0;
+
+        for(int i = 0 ; i < 8 ; i++)
+        {
+            v = (v << 8) | static_cast<unsigned char>(p[i]);
+        }
+
+        return v;
+    }
+
 }
 
 #endif
