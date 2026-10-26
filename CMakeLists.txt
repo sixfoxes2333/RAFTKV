@@ -161,6 +161,19 @@ add_executable(test_raft_follower_commit
 target_include_directories(test_raft_follower_commit PRIVATE src)
 
 
+# M6 第1步：Raft RPC 帧编解码（纯函数，无 socket）
+add_executable(test_raft_rpc_codec
+    tests/test_raft_rpc_codec.cpp
+    src/raft/rpc_codec.cpp)
+target_include_directories(test_raft_rpc_codec PRIVATE src)
+
+# M6 第2步：四类 RPC 正文编解码（固定长度 / 条目数两道闸 / 截断 / 布尔严格）
+add_executable(test_raft_rpc_codec_body
+    tests/test_raft_rpc_codec_body.cpp
+    src/raft/rpc_codec.cpp)
+target_include_directories(test_raft_rpc_codec_body PRIVATE src)
+
+
 # M5：可控消息队列、3/5 Core对象、真实Raft存储重启与发布顺序
 add_executable(test_raft_core_scenarios
     tests/test_raft_core_scenarios.cpp

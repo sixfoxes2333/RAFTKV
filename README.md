@@ -4,7 +4,7 @@
 支持 `SET` / `GET` / `DEL`；默认 `always` 模式按批 `fsync` 后确认写入，另有 `everysec/off` 模式。
 
 > 当前状态：**单节点持久化 KV 已封版**（tag `storage-v1.2`）—— 单机存储 + 网络层 + 异步架构 +
-> 批提交（group commit）全部完成；10/25 M5本轮完整普通回归 **36项通过**，配置的ASan/UBSan runner复测通过（不是全部36项都运行sanitizer；中途启动探测失败记录见§4）。本轮未重跑TSan。
+> 批提交（group commit）全部完成；10/26 M6前两步（Raft RPC 帧 + 四类正文编解码）完成，完整普通回归 **38项通过**，配置的ASan/UBSan runner通过（不是全部38项都运行sanitizer，见§4）。本轮未重跑TSan。
 > Raft 已实现持久化基座、Core选举/复制/提交（M1–M4），并通过M5本轮确定性组合验收。
 > **真实transport/RaftWorker/已提交KV执行尚未接通**；测试进程中的Core对象投递，不是三进程集群验收。
 > M5新增真实存储与可控消息队列的12组场景，R4查询失败传播已由用户修复并通过红→绿；其他复审待办未自动关闭。下一步M6。
@@ -281,7 +281,7 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 ## 4. 测试与工具
 
 ```bash
-bash tests/run_all.sh            # 36 项普通回归
+bash tests/run_all.sh            # 38 项普通回归
 bash tests/run_all.sh --slow     # 追加：崩溃注入 + 故障注入 + 慢 fsync 注入
 bash tests/run_all.sh --asan     # 追加：ASan/UBSan（服务器 + 端到端场景）
 bash tests/run_asan.sh           # ASan/UBSan（存储单测 + 背压 + 端到端，检查 sanitizer 输出）
@@ -294,6 +294,10 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 10/25 M4验收：完整普通35项一次通过，配置的ASan/UBSan runner通过（含M4、背压、单节点E2E）。提案7组、leader提交12组、follower提交9组；leader用例新增五Core多轮换届的Figure8类轨迹，保存用内存模型；follower用例使用真实StateStore/LogStore，包含三个Core对象两轮提交通知。均非真实网络集群。保存失败覆盖目录失效和保存后term查询失败，未声称复合pwrite/fsync故障已穷尽。分配失败目标只跑普通测试，LeakSanitizer关闭，本轮未跑TSan。
 
 10/25 M5验收：最新完整普通36项通过；新Core队列场景12组、follower/R4共10组均普通与ASan/UBSan通过。覆盖隔离换届、少数派不提交、64+64+2追平、旧回复配对、真实文件重开并重建Core等，不含TCP/生产Worker/KV apply。配置ASan runner中途有一次背压启动探测失败（各单元目标均通过，保留日志，后来服务器日志出现bind失败），原配置复测通过；占用/启动时序根因未确诊，未改阈值。
+
+10/26 M6第1步：新增 `tests/test_raft_rpc_codec.cpp`（8组）与 `src/raft/rpc*.{h,cpp}`——4B长度头+1B类型的帧、17MiB正文上限、半帧/粘包/未知类型均拒绝。普通37/37、配置ASan/UBSan通过；纯函数，无socket，不代表任何节点间通信已接通。
+
+10/26 M6第2步：四类RPC正文（投票请求32B、回复9B、复制请求44B定长头+变长条目、复制回复9B）。条目index不上线，由Core重算；布尔字段只认0/1；条目数两道闸（MAX_RPC_ENTRIES=4096 + 剩余字节/12），避免一条17MiB报文放大出上百万对象。测试9组，最大到4096条与每个截断点。普通38/38、配置ASan/UBSan通过；仍未接入socket。
 
 | 文件 | 作用 |
 |---|---|
@@ -325,6 +329,8 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 | `tests/test_raft_commit.cpp` | leader提交12组：多数派/当前任期、连续区间、退位重选、读取失败、红→绿及五Core的Figure8类覆盖轨迹；内存保存模型 |
 | `tests/test_raft_follower_commit.cpp` | follower提交原9组+M5 R4读失败围栏：原请求范围、真实存储失败门禁、3个Core提交通知；无socket/生产Worker/KV apply |
 | `tests/test_raft_core_scenarios.cpp` | M5共12组：3/5节点可控消息队列、重复/丢失/乱序、隔离重选/少数派、分批追平、真实存储重开和新Core；含跨事件不变量检查 |
+| `tests/test_raft_rpc_codec.cpp` | M6第1步：帧长度头/类型/17MiB上限/半帧与粘包/未知类型/失败不改写出参；纯函数，无socket |
+| `tests/test_raft_rpc_codec_body.cpp` | M6第2步：四类正文往返、固定长度严格、布尔只认0/1、4096/4097条目数两道闸、每个截断点、cmd_len谎报、正文经帧往返 |
 | `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync/epoll_ctl/pwrite/pread 失败、短写、慢 fsync） |
 
 两个测试工程上的约定：

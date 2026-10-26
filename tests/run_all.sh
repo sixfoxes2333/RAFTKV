@@ -328,6 +328,22 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft RPC 帧编解码（长度头 / 类型 / 17MiB 上限 / 半帧与粘包）=="
+if ./build/test_raft_rpc_codec; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft RPC 正文编解码（四类消息 / 条目数上限 / 截断点 / 布尔只认0和1）=="
+if ./build/test_raft_rpc_codec_body; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :
