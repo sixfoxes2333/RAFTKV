@@ -360,6 +360,14 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft transport（真实 loopback：握手/四类帧/半包/粘包/坏帧/慢 peer）=="
+if ./build/test_raft_transport; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

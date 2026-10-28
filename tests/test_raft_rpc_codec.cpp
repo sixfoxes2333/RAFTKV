@@ -214,8 +214,9 @@ void test_unknown_type()
 {
     std::string error;
 
+    // 1..5 是已知类型（5 = Hello）；0、6、255 都不是
     for(const std::uint8_t raw : {static_cast<std::uint8_t>(0),
-                                  static_cast<std::uint8_t>(5),
+                                  static_cast<std::uint8_t>(6),
                                   static_cast<std::uint8_t>(255)})
     {
         std::string frame = be32_only(1);
@@ -262,6 +263,29 @@ void test_sticky_frames_must_be_sliced()
     std::cout << "PASS concatenated frames are split by the caller, then decoded one by one\n";
 }
 
+void test_hello_frame()
+{
+    // Hello 的正文就是 8 字节的节点 ID，整帧 4 + 1 + 8 = 13 字节
+    const std::string body = be32_only(0) + std::string(4,'\0');   // 8 字节占位
+    CHECK(body.size() == 8);
+
+    std::string frame,error = "stale";
+    CHECK(raft::encode_frame(RpcType::Hello,body,frame,error));
+    CHECK(error.empty());
+    CHECK(frame.size() == 13);
+    CHECK(be32_at(frame,0) == 9);
+    CHECK(type_byte(frame) == static_cast<std::uint8_t>(RpcType::Hello));
+
+    RpcType decoded_type = RpcType::VoteRequest;
+    std::string decoded_body;
+
+    CHECK(raft::decode_frame(frame.data(),frame.size(),decoded_type,decoded_body,error));
+    CHECK(decoded_type == RpcType::Hello);
+    CHECK(decoded_body == body);
+
+    std::cout << "PASS hello frame: type 5 accepted, 13 bytes, body preserved\n";
+}
+
 void test_error_is_reset_on_success()
 {
     std::string frame, error = "previous failure";
@@ -292,6 +316,7 @@ int main()
     test_peek_frame_size();
     test_length_mismatch();
     test_unknown_type();
+    test_hello_frame();
     test_sticky_frames_must_be_sliced();
     test_error_is_reset_on_success();
 

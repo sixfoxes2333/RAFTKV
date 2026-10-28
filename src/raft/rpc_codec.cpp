@@ -11,7 +11,7 @@ namespace
     //排除未知 RPC
     bool type_known(std::uint8_t raw)
     {
-        return raw >= static_cast<std::uint8_t>(RpcType::VoteRequest)&&raw <= static_cast<std::uint8_t>(RpcType::AppendResponse);
+        return raw >= static_cast<std::uint8_t>(RpcType::VoteRequest)&&raw <= static_cast<std::uint8_t>(RpcType::Hello);
     }
 
     bool read_bool(const std::string& body,std::size_t at,bool& out,std::string& error)
@@ -348,6 +348,47 @@ bool decode_append_response(const std::string& body,AppendEntriesResponse& out,s
     out = parsed;
     return true;
 }
+
+bool encode_hello(std::uint64_t self_id,std::string& out,std::string& error)
+{
+    error.clear();
+
+    if(self_id == 0)
+    {
+        error = "rpc body : hello with zero id";
+        return false;
+    }
+
+    std::string body(HELLO_BODY_SIZE,'\0');
+    kv::put_be64(body.data(),self_id);
+
+    out = std::move(body);
+    return true;
+}
+
+bool decode_hello(const std::string& body,std::uint64_t& self_id,std::string& error)
+{
+    error.clear();
+
+    if(body.size() != HELLO_BODY_SIZE)
+    {
+        error = "rpc body : hello size mismatch";
+        return false;
+    }
+
+    const std::uint64_t id = kv::read_be64(body.data());
+
+    if(id == 0)
+    {
+        error = "rpc body : hello with zero id";
+        return false;
+    }
+
+    self_id = id;
+    return true;
+}
+
+
 
 
 }//namespace raft

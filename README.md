@@ -4,7 +4,7 @@
 支持 `SET` / `GET` / `DEL`；默认 `always` 模式按批 `fsync` 后确认写入，另有 `everysec/off` 模式。
 
 > 当前状态：**单节点持久化 KV 已封版**（tag `storage-v1.2`）—— 单机存储 + 网络层 + 异步架构 +
-> 批提交（group commit）全部完成；10/28 M6前四步（Raft RPC 帧 / 四类正文编解码 / 入站语义校验 / 配置解析）完成，完整普通回归 **40项通过**，配置的ASan/UBSan runner通过（不是全部40项都运行sanitizer，见§4）。本轮未重跑TSan。
+> 批提交（group commit）全部完成；10/28 M6五步完成（RPC 帧 / 四类正文 / 入站语义校验 / 配置解析 / 非阻塞 transport），完整普通回归 **41项通过**，配置的ASan/UBSan runner通过（不是全部41项都运行sanitizer，见§4）。本轮未重跑TSan。
 > Raft 已实现持久化基座、Core选举/复制/提交（M1–M4），并通过M5本轮确定性组合验收。
 > **真实transport/RaftWorker/已提交KV执行尚未接通**；测试进程中的Core对象投递，不是三进程集群验收。
 > M5新增真实存储与可控消息队列的12组场景，R4查询失败传播已由用户修复并通过红→绿；其他复审待办未自动关闭。下一步M6。
@@ -281,7 +281,7 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 ## 4. 测试与工具
 
 ```bash
-bash tests/run_all.sh            # 40 项普通回归
+bash tests/run_all.sh            # 41 项普通回归
 bash tests/run_all.sh --slow     # 追加：崩溃注入 + 故障注入 + 慢 fsync 注入
 bash tests/run_all.sh --asan     # 追加：ASan/UBSan（服务器 + 端到端场景）
 bash tests/run_asan.sh           # ASan/UBSan（存储单测 + 背压 + 端到端，检查 sanitizer 输出）
@@ -304,6 +304,8 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 10/28 M6第4步：`raft::parse_raft_config` 纯字符串解析 `KV_RAFT_ID`/`KV_RAFT_PEERS`/`KV_RAFT_DATA`（PEERS 列全部成员含自己，监听端口取自己那条），校验 ID/端口/`id@host:port` 语法/成员重复/自己缺失/地址冲突/空目录，失败不改出参；`load_raft_config_from_env` 只是读环境变量的薄层，缺变量报名字、不猜默认值。v1 只支持 IPv4。普通40/40、配置ASan/UBSan通过。
 
 10/28 测试脚手架修复：`net_backpressure`/`net_emfile`/`net_halfclose_flush` 三个测试启动服务器时没给数据库路径，会去扫工作目录里的 `kvdb.data`（现 853MB，ASan 下启动 30–34s），把 5 秒就绪探测拖死 —— 这正是 10/25 那次 ASan 背压失败的根因。三个测试改成各用 `/tmp` 私有空库并每轮先删除，ASan 门禁恢复稳定。
+
+10/28 M6第5步：`RaftTransport` 非阻塞收发（真实 loopback）。新增 Hello 帧类型在连接建立时互报节点 ID；只有 ID 小的一方发起连接，避免双方同时连上互判重复；收包按 4 字节长度切帧，请求类在 transport 内解码+语义校验后才回调；`send` 对未连接 peer 直接返回失败，不排队。7 组测试：握手、四类帧字节一致、半帧不提前派发、一次写两帧、坏帧（4GiB 长度/首帧非 Hello/谎报自己 ID/非法条目任期）全部断连、peer_down 通知、4MiB 卡住的 peer 不影响另一条。普通41/41、配置ASan/UBSan通过。仍未接 Worker，不能选主。
 
 | 文件 | 作用 |
 |---|---|
@@ -339,6 +341,7 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 | `tests/test_raft_rpc_codec_body.cpp` | M6第2步：四类正文往返、固定长度严格、布尔只认0/1、4096/4097条目数两道闸、每个截断点、cmd_len谎报、正文经帧往返 |
 | `tests/test_raft_rpc_validate.cpp` | M6第3步：投票/复制请求的语义规则表 + 真实存储证明（绕过校验会写入非法任期条目、重启被拒；走校验则日志不动） |
 | `tests/test_raft_config.cpp` | M6第4步：ID/端口/PEERS 语法/成员关系/环境变量缺失；失败不改出参与错误取名 |
+| `tests/test_raft_transport.cpp` | M6第5步：真实 loopback 的握手、四类帧、半包/粘包、坏帧断连、peer_down、慢 peer 隔离 |
 | `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync/epoll_ctl/pwrite/pread 失败、短写、慢 fsync） |
 
 两个测试工程上的约定：

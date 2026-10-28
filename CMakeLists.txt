@@ -191,6 +191,17 @@ add_executable(test_raft_config
     src/raft/config.cpp)
 target_include_directories(test_raft_config PRIVATE src)
 
+# M6 第5步：Raft 非阻塞 transport（真实 loopback socket）
+add_executable(test_raft_transport
+    tests/test_raft_transport.cpp
+    src/raft/transport.cpp
+    src/raft/config.cpp
+    src/raft/rpc_codec.cpp
+    src/raft/rpc_validate.cpp
+    src/raft/core.cpp
+    src/storage/record.cpp)
+target_include_directories(test_raft_transport PRIVATE src)
+
 
 # M5：可控消息队列、3/5 Core对象、真实Raft存储重启与发布顺序
 add_executable(test_raft_core_scenarios

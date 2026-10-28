@@ -32,6 +32,12 @@ bool decode_append_entries(const std::string& body,AppendEntriesRequest& out,std
 bool encode_append_response(const AppendEntriesResponse& in,std::string& out,std::string& error);
 bool decode_append_response(const std::string& body,AppendEntriesResponse& out,std::string& error);
 
+
+//连接握手 : 正文即 u64 节点 ID 
+bool encode_hello(std::uint64_t self_id,std::string& out,std::string& error);
+bool decode_hello(const std::string& body,std::uint64_t& self_id,std::string& error);
+
+
 }//namespace raft
 
 #endif
