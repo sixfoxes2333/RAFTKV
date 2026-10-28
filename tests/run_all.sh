@@ -344,6 +344,14 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft 入站校验（term/ID/日志尾一致/位置溢出/条目任期范围与单调）=="
+if ./build/test_raft_rpc_validate; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

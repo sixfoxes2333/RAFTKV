@@ -174,6 +174,18 @@ add_executable(test_raft_rpc_codec_body
 target_include_directories(test_raft_rpc_codec_body PRIVATE src)
 
 
+# M6 第3步：入站语义校验（规则表 + 真实存储证明绕过校验的后果）
+add_executable(test_raft_rpc_validate
+    tests/test_raft_rpc_validate.cpp
+    src/raft/rpc_validate.cpp
+    src/raft/core.cpp
+    src/raft/apply.cpp
+    src/raft/state.cpp
+    src/raft/logstore.cpp
+    src/storage/record.cpp)
+target_include_directories(test_raft_rpc_validate PRIVATE src)
+
+
 # M5：可控消息队列、3/5 Core对象、真实Raft存储重启与发布顺序
 add_executable(test_raft_core_scenarios
     tests/test_raft_core_scenarios.cpp
