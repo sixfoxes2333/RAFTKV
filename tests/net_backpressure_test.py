@@ -53,6 +53,7 @@ from kvproto import OP_SET, OP_GET, ST_OK, encode_request, recv_frame  # noqa: E
 SERVER = os.environ.get("KV_SERVER", "build/kvserver")
 PORT = int(os.environ.get("KV_PORT", "9006"))
 SERVER_LOG = "/tmp/kv_backpressure_server.log"
+DB_PATH = "/tmp/kv_backpressure_test.data"    # 私有空库：不要扫工作目录里的 kvdb.data
 PAYLOAD_SIZE = 8 * 1024 * 1024     # 8MB：远超 客户端收缓冲 + 服务器发缓冲
 SEND_BLOCK_TIME = 0.8              # 客户端发送后故意不读的时长（秒）
 READ_TIMEOUT = 60.0                # 读取总超时（秒）
@@ -74,7 +75,12 @@ def start_server():
     log = open(SERVER_LOG, "wb")
     env = os.environ.copy()
     env.setdefault("KV_TEST_SNDBUF", "4096")   # 服务器支持时生效；不支持也无害
-    proc = subprocess.Popen([SERVER], stdout=log, stderr=subprocess.STDOUT,
+    # 每轮都用全新的空库：工作目录里的 kvdb.data 可能有几百 MB，
+    # 启动恢复要几十秒，会把这里的 5 秒就绪探测拖死。
+    if os.path.exists(DB_PATH):
+        os.unlink(DB_PATH)
+
+    proc = subprocess.Popen([SERVER, DB_PATH], stdout=log, stderr=subprocess.STDOUT,
                             env=env, cwd=os.getcwd())
     deadline = time.time() + 5.0
     while time.time() < deadline:

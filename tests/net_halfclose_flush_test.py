@@ -49,6 +49,7 @@ from kvproto import OP_SET, OP_GET, ST_OK, encode_request, recv_frame  # noqa: E
 SERVER = os.environ.get("KV_SERVER", "build/kvserver")
 PORT = int(os.environ.get("KV_PORT", "9006"))
 SERVER_LOG = "/tmp/kv_halfclose_flush_server.log"
+DB_PATH = "/tmp/kv_halfclose_flush_test.data"    # 私有空库：不要扫工作目录里的 kvdb.data
 
 PAYLOAD_SIZE = 8 * 1024 * 1024      # 8MB：远大于"内核发送缓冲 + 接收缓冲"
 IDLE_WINDOW = 2.0                   # 观察服务器是否空转的时长（秒）
@@ -68,7 +69,11 @@ def start_server():
     log = open(SERVER_LOG, "wb")
     env = os.environ.copy()
     env.setdefault("KV_TEST_SNDBUF", "4096")   # 服务器支持时生效；不支持也无害
-    proc = subprocess.Popen([SERVER], stdout=log, stderr=subprocess.STDOUT,
+    # 每轮都用全新的空库，避免启动恢复扫到工作目录里的大 kvdb.data。
+    if os.path.exists(DB_PATH):
+        os.unlink(DB_PATH)
+
+    proc = subprocess.Popen([SERVER, DB_PATH], stdout=log, stderr=subprocess.STDOUT,
                             env=env, cwd=os.getcwd())
     deadline = time.time() + 5.0
     while time.time() < deadline:

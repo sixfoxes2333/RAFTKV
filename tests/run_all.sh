@@ -352,6 +352,14 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft 配置解析（ID/端口/PEERS 语法/成员关系/环境变量缺失）=="
+if ./build/test_raft_config; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

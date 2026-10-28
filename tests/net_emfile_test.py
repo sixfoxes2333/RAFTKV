@@ -41,6 +41,7 @@ from kvproto import (OP_SET, OP_GET, ST_OK,  # noqa: E402
 SERVER = os.environ.get("KV_SERVER", "build/kvserver")
 PORT = int(os.environ.get("KV_PORT", "9006"))
 SERVER_LOG = "/tmp/kv_emfile_server.log"
+DB_PATH = "/tmp/kv_emfile_test.data"    # 私有空库：不要扫工作目录里的 kvdb.data
 
 FD_LIMIT = 32                 # 服务器进程能打开的文件数上限
 N_ATTEMPTS = 45               # 客户端尝试建立的连接数（远超上限）
@@ -62,7 +63,11 @@ def _limit_fds():
 
 def start_server():
     log = open(SERVER_LOG, "wb")
-    proc = subprocess.Popen([SERVER], stdout=log, stderr=subprocess.STDOUT,
+    # 每轮都用全新的空库，避免启动恢复扫到工作目录里的大 kvdb.data。
+    if os.path.exists(DB_PATH):
+        os.unlink(DB_PATH)
+
+    proc = subprocess.Popen([SERVER, DB_PATH], stdout=log, stderr=subprocess.STDOUT,
                             cwd=os.getcwd(), preexec_fn=_limit_fds)
     deadline = time.time() + 5.0
     while time.time() < deadline:

@@ -99,6 +99,8 @@ echo "[ASan] 运行 Raft RPC 正文编解码测试"
 run_bin test_raft_rpc_codec_body
 echo "[ASan] 运行 Raft 入站校验测试"
 run_bin test_raft_rpc_validate
+echo "[ASan] 运行 Raft 配置解析测试"
+run_bin test_raft_config
 
 # ---- 3. 网络场景：背压（写满 → EAGAIN → 短写续写），必须真的跑起来 ----
 export KV_SERVER="$BUILD/kvserver"

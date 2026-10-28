@@ -185,6 +185,12 @@ add_executable(test_raft_rpc_validate
     src/storage/record.cpp)
 target_include_directories(test_raft_rpc_validate PRIVATE src)
 
+# M6 第4步：Raft 配置解析（纯字符串，无 socket/文件系统）
+add_executable(test_raft_config
+    tests/test_raft_config.cpp
+    src/raft/config.cpp)
+target_include_directories(test_raft_config PRIVATE src)
+
 
 # M5：可控消息队列、3/5 Core对象、真实Raft存储重启与发布顺序
 add_executable(test_raft_core_scenarios
