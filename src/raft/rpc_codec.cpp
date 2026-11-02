@@ -55,6 +55,37 @@ bool encode_frame(RpcType type,const std::string& body,std::string& out,std::str
 
 }
 
+//在原正文写入前写入编号
+bool encode_rpc_frame(RpcType type,std::uint64_t rpc_id,const std::string& body,std::string& out,std::string& error)
+{
+    error.clear();
+
+    if(!type_known(static_cast<std::uint8_t>(type)) || type == RpcType::Hello)
+    {
+        error = "rpc encode : business type required";
+        return false;
+    }
+
+    if(rpc_id == 0)
+    {
+        error = "rpc encode : rpc id must not be zero";
+        return false;
+    }
+
+    if(body.size() > MAX_RPC_PAYLOAD - RPC_TYPE_SIZE - RPC_ID_SIZE)
+    {
+        error = "rpc encode : payload too large";
+        return false;
+    }
+
+    std::string payload(RPC_ID_SIZE,'\0');
+    kv::put_be64(payload.data(),rpc_id);
+    payload += body;
+
+    return encode_frame(type,payload,out,error);
+}
+
+
 bool peek_frame_size(const char* data,std::size_t len,std::size_t& frame_size,std::string& error)
 {
     error.clear();
@@ -113,6 +144,42 @@ bool decode_frame(const char* data,std::size_t len,RpcType& type,std::string& bo
     body = std::move(parsed_body);
     return true;
 }
+
+//handle_frame 收到业务帧时调用
+bool decode_rpc_body(const std::string& wire_body,std::uint64_t& rpc_id,std::string& body,std::string& error)
+{
+    error.clear();
+
+    if(wire_body.size() < RPC_ID_SIZE)
+    {
+        error = "rpc decode : rpc id incomplete";
+        return false;
+    }
+
+    if(wire_body.size() > MAX_RPC_PAYLOAD - RPC_TYPE_SIZE)
+    {
+        error = "rpc decode : payload too large";
+        return false;
+    }
+
+    const std::uint64_t parsed_id = kv::read_be64(wire_body.data());
+
+    if(parsed_id == 0)
+    {
+        error = "rpc decode : rpc id must not be zero";
+        return false;
+    }
+
+    std::string parsed_body(wire_body.data() + RPC_ID_SIZE,wire_body.size() - RPC_ID_SIZE);
+
+    body = std::move(parsed_body);
+    rpc_id = parsed_id;
+
+    return true;
+}
+
+
+
 
 
 bool encode_vote_request(const RequestVoteRequest& in,std::string& out,std::string& error)

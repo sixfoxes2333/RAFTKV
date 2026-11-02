@@ -1,5 +1,6 @@
 #include "storage/record.h"
 #include "base/be32.h"
+#include <array>
 
 namespace kv
 {
@@ -7,22 +8,24 @@ namespace kv
     //查表加速 通过空间换时间
     uint32_t crc32(const char *data,size_t len)
     {
-        static uint32_t table[256]; //生成 256 字节查找表，处理每字节仅需一次异或+查表
-        static bool init = false; //仅在第一次调用时建表
-
-        if(!init)
+        static const std::array<uint32_t,256> table = [] 
         {
-            for(uint32_t i = 0 ; i < 256 ; i++)
+        std::array<uint32_t,256> result{};
+
+        for(uint32_t i = 0; i < 256; ++i)
+        {
+            uint32_t c = i;
+            for(int k = 0; k < 8; ++k)
             {
-                uint32_t c = i;
-                for(int k = 0 ; k < 8 ; k++)
-                {
-                    c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : (c >> 1); //逐位除法
-                    table[i] = c;
-                }
+                c = (c & 1)
+                    ? 0xEDB88320u ^ (c >> 1)
+                    : (c >> 1);
             }
-            init = true;
+            result[i] = c;
         }
+
+        return result;
+        }();
 
         uint32_t crc = 0xFFFFFFFFu; //初始化全为 1
         //逐字节滑动查表

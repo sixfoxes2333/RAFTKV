@@ -1,6 +1,7 @@
 #include "net/reactor.h"
 #include "app/storage_worker.h"
 #include "net/protocol.h"
+#include "raft/worker.h"
 #include<sys/socket.h>
 #include<netinet/in.h>
 #include<netinet/tcp.h>
@@ -11,12 +12,21 @@
 #include<arpa/inet.h>
 #include<memory>
 #include<cstdlib>
+#include <charconv>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/signalfd.h>
+#include <sys/timerfd.h>
+
 
 int g_idle_fd = -1;//预留占位 fd
 
 bool g_fatal = false; //全局致命标志
 
 kv::StorageWorker *g_worker = nullptr; //后台存储线程 Reactor 投递任务
+
+bool g_raft_mode = false; //启动时确定，运行期间不切换
+
 uint64_t g_next_sequence = 0; //任务序号
 
 const int MAX_MESSAGE = 16 * 1024 *1024; //防止恶意长度炸内存
@@ -140,6 +150,12 @@ void send_error(Connection* c)
 //处理消息
 void handle_message(Connection *c , const char *payload , size_t len)
 {
+    if(g_raft_mode)
+    {
+        send_error(c);
+        return;
+    }
+
     kv::Request req;
 
 

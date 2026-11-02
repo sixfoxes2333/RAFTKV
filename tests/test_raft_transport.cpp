@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +26,41 @@
     std::cerr << __FILE__ << ':' << __LINE__ << ": FAIL " #expr << '\n'; \
     std::exit(1); \
 } } while (false)
+
+// 链接器包装仅作用于本测试：定点让一次 send 失败，真实连接和其余收发保持原样。
+namespace {
+bool fail_next_send = false;
+bool force_async_connect = false;
+int injected_send_failures = 0;
+}
+
+extern "C" ssize_t __real_send(int,const void*,std::size_t,int);
+extern "C" int __real_connect(int,const sockaddr*,socklen_t);
+
+// 用 EPIPE 触发生产 transport 的关闭连接路径。
+extern "C" ssize_t __wrap_send(int fd,const void* data,std::size_t length,int flags)
+{
+    if(fail_next_send)
+    {
+        fail_next_send = false;
+        ++injected_send_failures;
+        errno = EPIPE;
+        return -1;
+    }
+    return __real_send(fd,data,length,flags);
+}
+
+// 即便内核立即完成连接，也让夹具走 connect_ready，避免依赖连接完成的时机。
+extern "C" int __wrap_connect(int fd,const sockaddr* address,socklen_t length)
+{
+    const int result = __real_connect(fd,address,length);
+    if(force_async_connect && result == 0)
+    {
+        errno = EINPROGRESS;
+        return -1;
+    }
+    return result;
+}
 
 namespace {
 
@@ -74,6 +110,18 @@ RaftConfig make_config(const std::string& id,const std::string& peers)
     return config;
 }
 
+// 每次驱动网络事件时检查本地错误，避免套件忽略失败后继续等待。
+void poll_checked(RaftTransport& transport,int timeout_ms)
+{
+    std::string error;
+    const bool ok = transport.poll(timeout_ms,error);
+    if(!ok)
+    {
+        std::cerr << "transport poll error: " << error << '\n';
+    }
+    CHECK(ok);
+}
+
 // ---------- 轮询直到条件成立 ----------
 
 template <typename Predicate>
@@ -89,8 +137,8 @@ bool pump_until(RaftTransport& a,RaftTransport& b,Predicate done,int budget_ms)
             return true;
         }
 
-        a.poll(5);
-        b.poll(5);
+        poll_checked(a,5);
+        poll_checked(b,5);
 
         if(done())
         {
@@ -103,8 +151,8 @@ bool pump_until(RaftTransport& a,RaftTransport& b,Predicate done,int budget_ms)
 
 void pump_for(RaftTransport& a,RaftTransport& b,int ms)
 {
-    a.poll(ms);
-    b.poll(0);
+    poll_checked(a,ms);
+    poll_checked(b,0);
 }
 
 template <typename Predicate>
@@ -120,7 +168,7 @@ bool poll_until(RaftTransport& t,Predicate done,int budget_ms)
             return true;
         }
 
-        t.poll(5);
+        poll_checked(t,5);
     }
 
     return done();
@@ -281,9 +329,9 @@ void test_handshake()
     int down_a = 0;
     int down_b = 0;
 
-    RaftTransport a(config_a,[](std::uint64_t,RpcType,const std::string&){},
+    RaftTransport a(config_a,[](std::uint64_t,RpcType,std::uint64_t,const std::string&){},
                     [&](std::uint64_t){ ++down_a; });
-    RaftTransport b(config_b,[](std::uint64_t,RpcType,const std::string&){},
+    RaftTransport b(config_b,[](std::uint64_t,RpcType,std::uint64_t,const std::string&){},
                     [&](std::uint64_t){ ++down_b; });
 
     std::string error;
@@ -315,14 +363,16 @@ void test_four_rpc_types()
     std::vector<RpcType> got_types;
     std::vector<std::string> got_bodies;
     std::vector<std::uint64_t> got_peers;
+    std::vector<std::uint64_t> got_ids;
 
-    RaftTransport a(config_a,[](std::uint64_t,RpcType,const std::string&){},[](std::uint64_t){});
+    RaftTransport a(config_a,[](std::uint64_t,RpcType,std::uint64_t,const std::string&){},[](std::uint64_t){});
     RaftTransport b(config_b,
-        [&](std::uint64_t peer,RpcType type,const std::string& body)
+        [&](std::uint64_t peer,RpcType type,std::uint64_t rpc_id,const std::string& body)
         {
             got_peers.push_back(peer);
             got_types.push_back(type);
             got_bodies.push_back(body);
+            got_ids.push_back(rpc_id);
         },
         [](std::uint64_t){});
 
@@ -361,12 +411,15 @@ void test_four_rpc_types()
         {RpcType::AppendResponse,  [&]{ std::string s,e; raft::encode_append_response(append_response,s,e); return s; }()},
     };
 
+    std::uint64_t next_id = 42;
     for(const auto& item : frames)
     {
-        CHECK(a.send(2,item.first,item.second,error));
+        CHECK(a.send(2,item.first,next_id++,item.second,error));
         pump_for(a,b,20);
     }
 
+    CHECK(pump_until(a,b,[&]{ return got_types.size() == 4; },2000));
+    CHECK(got_ids.size() == 4);
     CHECK(got_types.size() == 4);
     CHECK(got_bodies.size() == 4);
     CHECK(got_peers.size() == 4);
@@ -376,6 +429,7 @@ void test_four_rpc_types()
         CHECK(got_types[i] == frames[i].first);
         CHECK(got_bodies[i] == frames[i].second);   // 字节级一致
         CHECK(got_peers[i] == 1);                   // 对端看到的是 A 的 ID
+        CHECK(got_ids[i] == 42 + i);
     }
 
     a.stop();
@@ -395,7 +449,7 @@ void test_half_frame_is_not_dispatched()
         "1@127.0.0.1:" + std::to_string(port_a) + ",2@127.0.0.1:" + std::to_string(port_b));
 
     int calls = 0;
-    RaftTransport b(config_b,[&](std::uint64_t,RpcType,const std::string&){ ++calls; },[](std::uint64_t){});
+    RaftTransport b(config_b,[&](std::uint64_t,RpcType,std::uint64_t,const std::string&){ ++calls; },[](std::uint64_t){});
 
     std::string error;
     CHECK(b.start(error));
@@ -406,31 +460,31 @@ void test_half_frame_is_not_dispatched()
 
     std::string body,frame;
     CHECK(raft::encode_vote_response(response,body,error));
-    CHECK(raft::encode_frame(RpcType::VoteResponse,body,frame,error));
+    CHECK(raft::encode_rpc_frame(RpcType::VoteResponse,101,body,frame,error));
 
     const int fd = raw_connect(port_b);
 
     std::string hello_body,hello_frame;
-    CHECK(raft::encode_hello(7,hello_body,error));
+    CHECK(raft::encode_hello(1,hello_body,error));
     CHECK(raft::encode_frame(RpcType::Hello,hello_body,hello_frame,error));
     raw_send(fd,hello_frame);
 
-    b.poll(20);
+    poll_checked(b,20);
     CHECK(calls == 0);       // 握手帧不算业务帧
 
     // 先只发前 3 个字节：连长度头都不完整
     raw_send(fd,frame.substr(0,3));
-    b.poll(30);
+    poll_checked(b,30);
     CHECK(calls == 0);
 
     // 补到差一字节
     raw_send(fd,frame.substr(3,frame.size() - 4));
-    b.poll(30);
+    poll_checked(b,30);
     CHECK(calls == 0);
 
     // 最后一个字节，这一帧才完整
     raw_send(fd,frame.substr(frame.size() - 1));
-    b.poll(30);
+    CHECK(poll_until(b,[&]{ return calls == 1; },2000));
     CHECK(calls == 1);
 
     ::close(fd);
@@ -450,14 +504,16 @@ void test_two_frames_in_one_write()
         "1@127.0.0.1:" + std::to_string(port_a) + ",2@127.0.0.1:" + std::to_string(port_b));
 
     std::vector<std::uint64_t> terms;
+    std::vector<std::uint64_t> ids;
     RaftTransport b(config_b,
-        [&](std::uint64_t,RpcType type,const std::string& body)
+        [&](std::uint64_t,RpcType type,std::uint64_t rpc_id,const std::string& body)
         {
             CHECK(type == RpcType::VoteResponse);
             RequestVoteResponse parsed;
             std::string error;
             CHECK(raft::decode_vote_response(body,parsed,error));
             terms.push_back(parsed.term);
+            ids.push_back(rpc_id);
         },
         [](std::uint64_t){});
 
@@ -474,10 +530,10 @@ void test_two_frames_in_one_write()
 
     std::string b1,f1,b2,f2,hello_body,hello_frame;
     CHECK(raft::encode_vote_response(first,b1,error));
-    CHECK(raft::encode_frame(RpcType::VoteResponse,b1,f1,error));
+    CHECK(raft::encode_rpc_frame(RpcType::VoteResponse,201,b1,f1,error));
     CHECK(raft::encode_vote_response(second,b2,error));
-    CHECK(raft::encode_frame(RpcType::VoteResponse,b2,f2,error));
-    CHECK(raft::encode_hello(7,hello_body,error));
+    CHECK(raft::encode_rpc_frame(RpcType::VoteResponse,202,b2,f2,error));
+    CHECK(raft::encode_hello(1,hello_body,error));
     CHECK(raft::encode_frame(RpcType::Hello,hello_body,hello_frame,error));
 
     const int fd = raw_connect(port_b);
@@ -489,6 +545,7 @@ void test_two_frames_in_one_write()
     CHECK(poll_until(b,[&]{ return terms.size() >= 2; },2000));
     CHECK(terms.size() == 2);
     CHECK(terms[0] == 11 && terms[1] == 12);   // 顺序保持
+    CHECK(ids.size() == 2 && ids[0] == 201 && ids[1] == 202);
 
     ::close(fd);
     b.stop();
@@ -507,7 +564,7 @@ void test_bad_frames_are_refused()
         "1@127.0.0.1:" + std::to_string(port_a) + ",2@127.0.0.1:" + std::to_string(port_b));
 
     int calls = 0;
-    RaftTransport b(config_b,[&](std::uint64_t,RpcType,const std::string&){ ++calls; },[](std::uint64_t){});
+    RaftTransport b(config_b,[&](std::uint64_t,RpcType,std::uint64_t,const std::string&){ ++calls; },[](std::uint64_t){});
 
     std::string error;
     CHECK(b.start(error));
@@ -516,7 +573,7 @@ void test_bad_frames_are_refused()
     {
         const int fd = raw_connect(port_b);
         std::string hello_body,hello_frame;
-        CHECK(raft::encode_hello(7,hello_body,error));
+        CHECK(raft::encode_hello(1,hello_body,error));
         CHECK(raft::encode_frame(RpcType::Hello,hello_body,hello_frame,error));
         raw_send(fd,hello_frame);
 
@@ -539,7 +596,7 @@ void test_bad_frames_are_refused()
 
         std::string body,frame;
         CHECK(raft::encode_vote_response(response,body,error));
-        CHECK(raft::encode_frame(RpcType::VoteResponse,body,frame,error));
+        CHECK(raft::encode_rpc_frame(RpcType::VoteResponse,101,body,frame,error));
         raw_send(fd,frame);
 
         CHECK(poll_until(b,[&]{ return raw_sees_close(fd,5); },2000));
@@ -565,7 +622,7 @@ void test_bad_frames_are_refused()
         const int fd = raw_connect(port_b);
 
         std::string hello_body,hello_frame;
-        CHECK(raft::encode_hello(7,hello_body,error));
+        CHECK(raft::encode_hello(1,hello_body,error));
         CHECK(raft::encode_frame(RpcType::Hello,hello_body,hello_frame,error));
         raw_send(fd,hello_frame);
 
@@ -578,7 +635,7 @@ void test_bad_frames_are_refused()
 
         std::string body,frame;
         CHECK(raft::encode_append_entries(poison,body,error));
-        CHECK(raft::encode_frame(RpcType::AppendEntries,body,frame,error));
+        CHECK(raft::encode_rpc_frame(RpcType::AppendEntries,105,body,frame,error));
         raw_send(fd,frame);
 
         CHECK(poll_until(b,[&]{ return raw_sees_close(fd,5); },2000));
@@ -604,9 +661,9 @@ void test_peer_down_is_reported()
         "1@127.0.0.1:" + std::to_string(port_a) + ",2@127.0.0.1:" + std::to_string(port_b));
 
     std::vector<std::uint64_t> down;
-    RaftTransport a(config_a,[](std::uint64_t,RpcType,const std::string&){},
+    RaftTransport a(config_a,[](std::uint64_t,RpcType,std::uint64_t,const std::string&){},
                     [&](std::uint64_t peer){ down.push_back(peer); });
-    RaftTransport b(config_b,[](std::uint64_t,RpcType,const std::string&){},[](std::uint64_t){});
+    RaftTransport b(config_b,[](std::uint64_t,RpcType,std::uint64_t,const std::string&){},[](std::uint64_t){});
 
     std::string error;
     CHECK(b.start(error));
@@ -620,7 +677,7 @@ void test_peer_down_is_reported()
 
     while(std::chrono::steady_clock::now() < deadline && down.empty())
     {
-        a.poll(10);
+        poll_checked(a,10);
     }
 
     CHECK(down.size() == 1);
@@ -651,8 +708,8 @@ void test_slow_peer_does_not_block_others()
     RaftConfig config_b = make_config("2",peers);
 
     int got_at_b = 0;
-    RaftTransport a(config_a,[](std::uint64_t,RpcType,const std::string&){},[](std::uint64_t){});
-    RaftTransport b(config_b,[&](std::uint64_t,RpcType,const std::string&){ ++got_at_b; },[](std::uint64_t){});
+    RaftTransport a(config_a,[](std::uint64_t,RpcType,std::uint64_t,const std::string&){},[](std::uint64_t){});
+    RaftTransport b(config_b,[&](std::uint64_t,RpcType,std::uint64_t,const std::string&){ ++got_at_b; },[](std::uint64_t){});
 
     std::string error;
     CHECK(b.start(error));
@@ -662,7 +719,7 @@ void test_slow_peer_does_not_block_others()
 
     CHECK(pump_until(a,b,[&]{ return a.connected(3) && a.connected(2); },3000));
 
-    // 给不读的那个 peer 灌 4MiB：必然写不完，停在 EAGAIN
+    // 向不再读取的 peer 发送 4MiB，同时检查另一条连接仍能收消息。
     AppendEntriesRequest big;
     big.term = 5;
     big.leader_id = 1;
@@ -672,9 +729,9 @@ void test_slow_peer_does_not_block_others()
 
     std::string big_body,big_frame;
     CHECK(raft::encode_append_entries(big,big_body,error));
-    CHECK(raft::encode_frame(RpcType::AppendEntries,big_body,big_frame,error));
+    CHECK(raft::encode_rpc_frame(RpcType::AppendEntries,100,big_body,big_frame,error));
 
-    CHECK(a.send(3,RpcType::AppendEntries,big_body,error));
+    CHECK(a.send(3,RpcType::AppendEntries,100,big_body,error));
 
     // 另一条连接照常工作
     RequestVoteResponse response;
@@ -683,7 +740,7 @@ void test_slow_peer_does_not_block_others()
 
     std::string small_body;
     CHECK(raft::encode_vote_response(response,small_body,error));
-    CHECK(a.send(2,RpcType::VoteResponse,small_body,error));
+    CHECK(a.send(2,RpcType::VoteResponse,101,small_body,error));
 
     CHECK(pump_until(a,b,[&]{ return got_at_b > 0; },2000));
     CHECK(got_at_b == 1);
@@ -691,13 +748,109 @@ void test_slow_peer_does_not_block_others()
     a.stop();
     b.stop();
 
-    std::cout << "PASS slow peer: a stuck 4MiB write does not stop the other peer\n";
+    std::cout << "PASS slow peer: a 4MiB send to a non-reading peer does not stop the other peer\n";
+}
+
+// connect_ready 发 Hello 失败后会删除 Connection，随后只能用事先保存的 fd 查表。
+void test_connect_hello_send_failure()
+{
+    StuckPeer extra;
+    extra.listen();
+    const auto port_a = free_port();
+    auto port_b = free_port();
+    while(port_b == port_a) port_b = free_port();
+    const std::string peers = "1@127.0.0.1:" + std::to_string(port_a) +
+                             ",2@127.0.0.1:" + std::to_string(port_b) +
+                             ",3@127.0.0.1:" + std::to_string(extra.port);
+    RaftTransport a(make_config("1",peers),
+        [](std::uint64_t,RpcType,std::uint64_t,const std::string&){},
+        [](std::uint64_t){});
+    RaftTransport b(make_config("2",peers),
+        [](std::uint64_t,RpcType,std::uint64_t,const std::string&){},
+        [](std::uint64_t){});
+    std::string error;
+    CHECK(b.start(error));
+    force_async_connect = true;
+    CHECK(a.start(error));
+    force_async_connect = false;
+
+    const int before = injected_send_failures;
+    fail_next_send = true;
+    CHECK(poll_until(a,[&]{ return injected_send_failures == before + 1; },2000));
+    CHECK(!fail_next_send);
+    CHECK(!a.connected(2));
+    a.stop();
+    b.stop();
+    std::cout << "PASS lifetime: failed Hello send closes connection without a stale reference\n";
+}
+
+// 模拟 Worker 在收包回调里回包失败：连接已被 send 删除，read_ready 必须结束处理。
+void test_callback_reply_send_failure()
+{
+    const auto port_a = free_port();
+    auto port_b = free_port();
+    while(port_b == port_a) port_b = free_port();
+    const std::string peers = "1@127.0.0.1:" + std::to_string(port_a) +
+                             ",2@127.0.0.1:" + std::to_string(port_b);
+    int calls = 0;
+    int down = 0;
+    RaftTransport* receiver = nullptr;
+    RaftTransport b(make_config("2",peers),
+        [&](std::uint64_t peer,RpcType type,std::uint64_t id,const std::string& body)
+        {
+            CHECK(peer == 1 && type == RpcType::VoteRequest && id == 42);
+            RequestVoteRequest request;
+            std::string reply_body,error;
+            CHECK(raft::decode_vote_request(body,request,error));
+            CHECK(raft::encode_vote_response(
+                  RequestVoteResponse{request.term,true},reply_body,error));
+            const int before = injected_send_failures;
+            fail_next_send = true;
+            CHECK(!receiver->send(peer,RpcType::VoteResponse,id,reply_body,error));
+            CHECK(injected_send_failures == before + 1);
+            CHECK(!error.empty());
+            ++calls;
+        },
+        [&](std::uint64_t peer) { CHECK(peer == 1); ++down; });
+    receiver = &b;
+    std::string error;
+    CHECK(b.start(error));
+    RequestVoteRequest request;
+    request.term = 3;
+    request.candidate_id = 1;
+    std::string body;
+    CHECK(raft::encode_vote_request(request,body,error));
+    const int fd = raw_connect(port_b);
+    std::string hello_body,hello,first,second;
+    CHECK(raft::encode_hello(1,hello_body,error));
+    CHECK(raft::encode_frame(RpcType::Hello,hello_body,hello,error));
+    CHECK(raft::encode_rpc_frame(RpcType::VoteRequest,42,body,first,error));
+    CHECK(raft::encode_rpc_frame(RpcType::VoteRequest,43,body,second,error));
+    // 第一帧回调关闭连接时，输入缓冲中还有第二帧。
+    raw_send(fd,hello + first + second);
+    CHECK(poll_until(b,[&]{ return calls == 1; },2000));
+    CHECK(down == 1);
+    CHECK(!b.connected(1));
+    CHECK(!fail_next_send);
+    ::close(fd);
+    b.stop();
+    std::cout << "PASS lifetime: callback reply failure closes connection without read_ready UAF\n";
 }
 
 } // namespace
 
-int main()
+int main(int argc,char** argv)
 {
+    if(argc == 2 && std::string(argv[1]) == "--connect-send-failure")
+    {
+        test_connect_hello_send_failure();
+        return 0;
+    }
+    if(argc == 2 && std::string(argv[1]) == "--callback-send-failure")
+    {
+        test_callback_reply_send_failure();
+        return 0;
+    }
     test_handshake();
     test_four_rpc_types();
     test_half_frame_is_not_dispatched();
@@ -705,6 +858,8 @@ int main()
     test_bad_frames_are_refused();
     test_peer_down_is_reported();
     test_slow_peer_does_not_block_others();
+    test_connect_hello_send_failure();
+    test_callback_reply_send_failure();
 
     std::cout << "raft transport PASS (real loopback sockets)\n";
     return 0;

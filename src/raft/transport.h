@@ -17,8 +17,8 @@ class RaftTransport
 {
 public:
 
-//收到一条已解码。已校验的 RPC
-using MessageHandler = std::function<void(std::uint64_t peer,RpcType type,const std::string& body)>;
+//收到业务 RPC 时，交出来源、类型、请求编号和原正文
+using MessageHandler = std::function<void(std::uint64_t peer,RpcType type,std::uint64_t rpc_id,const std::string& body)>;
 
 //到某个 peer 时连接断了，外层据此清理掉在途请求
 using PeerDownHandler = std::function<void(std::uint64_t peer)>;
@@ -34,13 +34,13 @@ RaftTransport& operator=(const RaftTransport&) = delete;
 bool start(std::string& error);
 
 //一次 epoll_wait + 处理时间
-void poll(int timeout_ms);
+bool poll(int timeout_ms,std::string& error);
 
 //关闭所有连接和监听
 void stop();
 
-//发一帧给 peer ，对端未连接则直接返回 false
-bool send(std::uint64_t peer,RpcType type,const std::string& body,std::string& error);
+//发业务帧；调用者提供请求编号，回复沿用收到的编号
+bool send(std::uint64_t peer,RpcType type,std::uint64_t rpc_id,const std::string& body,std::string& error);
 
 //这条连接是否握手完成
 bool connected(std::uint64_t peer)const;

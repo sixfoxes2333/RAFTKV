@@ -368,6 +368,30 @@ else
 fi
 
 echo
+echo "== $((++STEP)) RaftWorker 启动（真实状态/日志恢复、缺失/损坏拒绝、目录锁）=="
+if ./build/test_raft_worker_init; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) RaftWorker 后台线程（真实 TCP/选举/快照/失败停止确认）=="
+if timeout 90 ./build/test_raft_worker_live; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) RaftWorker 三进程（心跳/kill -9 重选/重启/130条追平）=="
+if timeout 90 python3 tests/raft_worker_process_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

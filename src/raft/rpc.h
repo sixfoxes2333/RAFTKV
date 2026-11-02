@@ -23,6 +23,9 @@ inline constexpr std::size_t RPC_TYPE_SIZE = 1;
 inline constexpr std::size_t RPC_HEADER_SIZE = RPC_LENGTH_SIZE + RPC_TYPE_SIZE;
 inline constexpr std::size_t HELLO_BODY_SIZE = 8;
 
+//四类 RPC 的请求编号占 8 字节，请求与回复使用同一编号
+inline constexpr std::size_t RPC_ID_SIZE = 8;
+
 //一条 command 最多 16 MiB 17 MiB 装下一个合法请求
 inline constexpr std::size_t MAX_RPC_PAYLOAD = 17*1024*1024;
 

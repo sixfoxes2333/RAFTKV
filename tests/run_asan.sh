@@ -51,7 +51,7 @@ run_bin()
     local name="$1"
     local log="/tmp/kv_asan_${name}.log"
 
-    if "$BUILD/$name" > "$log" 2>&1; then
+    if timeout 180 "$BUILD/$name" > "$log" 2>&1; then
         echo "       $name 退出码 0"
     else
         echo "       $name 非零退出，日志尾部："
@@ -103,6 +103,20 @@ echo "[ASan] 运行 Raft 配置解析测试"
 run_bin test_raft_config
 echo "[ASan] 运行 Raft transport 测试（真实 loopback socket）"
 run_bin test_raft_transport
+echo "[ASan] 运行 RaftWorker 启动恢复与目录锁测试"
+run_bin test_raft_worker_init
+echo "[ASan] 运行 RaftWorker 实际线程/网络和失败停止测试"
+run_bin test_raft_worker_live
+
+echo "[ASan] 运行实际 RaftWorker 三进程选举/重选/恢复"
+RAFT_PROCESS_LOG=/tmp/kv_asan_raft_worker_process.log
+if KV_RAFT_WORKER_NODE="$BUILD/raft_worker_node" timeout 90 python3 "$REPO/tests/raft_worker_process_test.py" > "$RAFT_PROCESS_LOG" 2>&1; then
+    echo "       实际 Worker 三进程测试退出码 0（子进程日志也检查 sanitizer）"
+else
+    echo "       !! 实际 Worker 三进程测试失败："
+    tail -20 "$RAFT_PROCESS_LOG"
+    fail=1
+fi
 
 # ---- 3. 网络场景：背压（写满 → EAGAIN → 短写续写），必须真的跑起来 ----
 export KV_SERVER="$BUILD/kvserver"

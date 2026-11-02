@@ -276,9 +276,10 @@ void RaftTransport::connect_ready(Connection& conn)
     }
 
 
+    const int fd = conn.fd;
     send_hello(conn);
 
-    const auto it = conns_.find(conn.fd);
+    const auto it = conns_.find(fd);
 
     if(it == conns_.end())
     {
@@ -494,7 +495,7 @@ bool RaftTransport::connected(std::uint64_t peer)const
     return peer_fd_.count(peer) != 0;
 }
 
-bool RaftTransport::send(std::uint64_t peer,RpcType type,const std::string& body,std::string&error)
+bool RaftTransport::send(std::uint64_t peer,RpcType type,std::uint64_t rpc_id,const std::string& body,std::string& error)
 {
     error.clear();
 
@@ -514,12 +515,16 @@ bool RaftTransport::send(std::uint64_t peer,RpcType type,const std::string& body
         return false;
     }
 
-    if(!queue_frame(type,body,it->second.out,error))
+    std::string frame;
+
+    if(!encode_rpc_frame(type,rpc_id,body,frame,error))
     {
         return false;
     }
 
-    // 写失败会关掉连接，这时这一帧没发出去，要如实返回失败
+    it->second.out += frame;
+
+    // 写失败会关掉连接
     if(!pump_write(it->second))
     {
         error = "raft transport : connection closed while sending";
@@ -530,13 +535,15 @@ bool RaftTransport::send(std::uint64_t peer,RpcType type,const std::string& body
 }
 
 
-void RaftTransport::poll(int timeout_ms)
+bool RaftTransport::poll(int timeout_ms,std::string& error)
 {
+    error.clear();
     busy_ = false;
 
     if(!running_)
     {
-        return;
+        error = "raft transport : not running";
+        return false;
     }
 
     dial_due_peers();
@@ -547,7 +554,14 @@ void RaftTransport::poll(int timeout_ms)
 
     if(n < 0)
     {
-        return;
+        if(errno == EINTR)
+        {
+            return true;
+        }
+
+        const int code = errno;
+        error = std::string("raft transport : epoll_wait failed : ") + std::strerror(code);
+        return false;
     }
 
     for(int i = 0 ; i < n ; i++)
@@ -605,6 +619,7 @@ void RaftTransport::poll(int timeout_ms)
 
     }
 
+    return true;
 
 }
 
@@ -687,6 +702,11 @@ void RaftTransport::read_ready(Connection& conn)
             return;
         }
 
+        if(conns_.find(fd) == conns_.end())
+        {
+            return;
+        }
+
     }
 
     if(at != 0)
@@ -743,11 +763,20 @@ bool RaftTransport::handle_frame(Connection& conn,RpcType type,const std::string
         return false;
     }
 
+    // Hello 已处理完，业务帧先拆出编号，再解码原正文。
+    std::uint64_t rpc_id = 0;
+    std::string rpc_body;
+
+    if(!decode_rpc_body(body,rpc_id,rpc_body,error))
+    {
+        return false;
+    }
+
     if(type == RpcType::VoteRequest)
     {
         RequestVoteRequest request;
 
-        if(!decode_vote_request(body,request,error) || !validate_vote_request(request,error))
+        if(!decode_vote_request(rpc_body,request,error) || !validate_vote_request(request,error))
         {
             return false;
         }
@@ -756,7 +785,7 @@ bool RaftTransport::handle_frame(Connection& conn,RpcType type,const std::string
     {
         AppendEntriesRequest request;
 
-        if(!decode_append_entries(body,request,error) || !validate_append_entries(request,error))
+        if(!decode_append_entries(rpc_body,request,error) || !validate_append_entries(request,error))
         {
             return false;
         }
@@ -768,7 +797,7 @@ bool RaftTransport::handle_frame(Connection& conn,RpcType type,const std::string
         return false;
     }
 
-    on_message_(conn.peer,type,body);
+    on_message_(conn.peer,type,rpc_id,rpc_body);
     return true;
 
 }

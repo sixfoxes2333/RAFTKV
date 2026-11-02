@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <iostream>
 #include <string>
 
@@ -18,6 +19,8 @@ using raft::RpcType;
 // 测试自己认定长度头是 4 字节，不引用生产常量：
 // 否则把常量写错时，测试会跟着一起错，等于没测。
 constexpr std::size_t kLengthField = 4;
+constexpr std::size_t kIdField = 8;
+constexpr std::size_t kPayloadLimit = 17 * 1024 * 1024;
 
 // 测试自己按大端拆 4 字节，不去调生产代码的读函数：
 // 否则"用同一个函数验证它自己"，写错了也会一起错。
@@ -286,6 +289,276 @@ void test_hello_frame()
     std::cout << "PASS hello frame: type 5 accepted, 13 bytes, body preserved\n";
 }
 
+// 测试自己生成 8 字节大端编号，用来构造独立于生产编码函数的输入。
+std::string id_bytes(std::uint64_t id)
+{
+    std::string bytes(kIdField,'\0');
+    for(std::size_t i = 0; i < kIdField; ++i)
+    {
+        bytes[kIdField - 1 - i] = static_cast<char>((id >> (8 * i)) & 0xffu);
+    }
+    return bytes;
+}
+
+// 验证完整业务帧的布局，再按实际接收顺序还原编号和正文。
+std::string rpc_roundtrip_body(RpcType type,std::uint64_t id,const std::string& body)
+{
+    std::string frame,error = "stale";
+    CHECK(raft::encode_rpc_frame(type,id,body,frame,error));
+    CHECK(error.empty());
+    CHECK(frame.size() == kLengthField + 1 + kIdField + body.size());
+    CHECK(be32_at(frame,0) == 1 + kIdField + body.size());
+    CHECK(type_byte(frame) == static_cast<std::uint8_t>(type));
+    CHECK(frame.compare(kLengthField + 1,kIdField,id_bytes(id)) == 0);
+
+    RpcType decoded_type = RpcType::Hello;
+    std::string wire_body;
+    error = "stale";
+    CHECK(raft::decode_frame(frame.data(),frame.size(),decoded_type,wire_body,error));
+    CHECK(error.empty());
+    CHECK(decoded_type == type);
+
+    std::uint64_t decoded_id = 0;
+    std::string decoded_body = "stale";
+    error = "stale";
+    CHECK(raft::decode_rpc_body(wire_body,decoded_id,decoded_body,error));
+    CHECK(error.empty());
+    CHECK(decoded_id == id);
+    CHECK(decoded_body == body);
+    return decoded_body;
+}
+
+// 混合字节编号和手写黄金帧，分别检查编码与解码的 64 位宽度、偏移和字节序。
+void test_rpc_id_golden_bytes()
+{
+    const std::uint64_t id = UINT64_C(0x0102030405060708);
+    const std::string literal_id("\x01\x02\x03\x04\x05\x06\x07\x08",8);
+    const std::string body("\0\xffX\n",4);
+    std::string expected("\0\0\0\x0d\x04",5);
+    expected += literal_id;
+    expected += body;
+
+    std::string frame,error;
+    CHECK(raft::encode_rpc_frame(RpcType::AppendResponse,id,body,frame,error));
+    CHECK(frame == expected);
+
+    std::uint64_t decoded_id = 77;
+    std::string decoded_body;
+    CHECK(raft::decode_rpc_body(literal_id + body,decoded_id,decoded_body,error));
+    CHECK(decoded_id == id);
+    CHECK(decoded_body == body);
+    std::cout << "PASS rpc id golden bytes: 8-byte big-endian id, exact offsets and length\n";
+}
+
+// 四类业务帧遍历编号边界、空正文和二进制正文，并检查原地编码/解码。
+void test_rpc_id_roundtrip()
+{
+    const std::uint64_t ids[] = {
+        1,UINT64_C(0x100000001),UINT64_C(0x8000000000000000),
+        std::numeric_limits<std::uint64_t>::max()
+    };
+    const std::string bodies[] = {std::string(),std::string("a\0b\xff\n",5)};
+    for(const auto type : ALL_TYPES)
+    {
+        for(const auto id : ids)
+        {
+            for(const auto& body : bodies)
+            {
+                CHECK(rpc_roundtrip_body(type,id,body) == body);
+            }
+        }
+    }
+
+    const std::string original("x\0y",3);
+    std::string data = original,error;
+    CHECK(raft::encode_rpc_frame(RpcType::VoteRequest,9,data,data,error));
+    RpcType type = RpcType::Hello;
+    CHECK(raft::decode_frame(data.data(),data.size(),type,data,error));
+    std::uint64_t id = 0;
+    CHECK(raft::decode_rpc_body(data,id,data,error));
+    CHECK(id == 9 && data == original);
+    std::cout << "PASS rpc id round-trip: four types, u64 boundaries, binary/empty and in-place outputs\n";
+}
+
+// 编号为零、Hello 和未知业务类型都不能交给业务帧编码；失败保留 out。
+void test_rpc_id_invalid_encode()
+{
+    const RpcType invalid_types[] = {
+        RpcType::Hello,static_cast<RpcType>(0),
+        static_cast<RpcType>(6),static_cast<RpcType>(255)
+    };
+    for(const auto type : invalid_types)
+    {
+        std::string out = "keep",error = "stale";
+        CHECK(!raft::encode_rpc_frame(type,1,"body",out,error));
+        CHECK(!error.empty() && error != "stale");
+        CHECK(out == "keep");
+    }
+    for(const auto type : ALL_TYPES)
+    {
+        std::string out = "keep",error = "stale";
+        CHECK(!raft::encode_rpc_frame(type,0,"body",out,error));
+        CHECK(!error.empty() && error != "stale");
+        CHECK(out == "keep");
+    }
+    std::cout << "PASS rpc id encode refusal: zero id, Hello and unknown types preserve out\n";
+}
+
+// 0..7 字节不够一个编号；全零编号也无效，两项出参均应保留。
+void test_rpc_id_invalid_decode()
+{
+    for(std::size_t len = 0; len < kIdField; ++len)
+    {
+        std::uint64_t id = 99;
+        std::string body = "keep",error = "stale";
+        CHECK(!raft::decode_rpc_body(std::string(len,'\xa5'),id,body,error));
+        CHECK(!error.empty() && error != "stale");
+        CHECK(id == 99 && body == "keep");
+    }
+    std::uint64_t id = 99;
+    std::string body = "keep",error = "stale";
+    CHECK(!raft::decode_rpc_body(id_bytes(0) + "data",id,body,error));
+    CHECK(!error.empty() && error != "stale");
+    CHECK(id == 99 && body == "keep");
+    std::cout << "PASS rpc id decode refusal: every short id and zero id preserve both outputs\n";
+}
+
+// 17 MiB payload 要同时容纳类型、编号和正文；分别测编码和独立解码的上界。
+void test_rpc_id_payload_limit()
+{
+    CHECK(raft::RPC_ID_SIZE == kIdField);
+    CHECK(raft::MAX_RPC_PAYLOAD == kPayloadLimit);
+    {
+        const std::string body(kPayloadLimit - 1 - kIdField,'x');
+        CHECK(rpc_roundtrip_body(RpcType::AppendEntries,
+              std::numeric_limits<std::uint64_t>::max(),body) == body);
+    }
+    {
+        const std::string too_large(kPayloadLimit - kIdField,'x');
+        std::string out = "keep",error;
+        CHECK(!raft::encode_rpc_frame(RpcType::AppendEntries,1,too_large,out,error));
+        CHECK(!error.empty() && out == "keep");
+    }
+    {
+        std::string wire_body(kPayloadLimit,'x');
+        wire_body.replace(0,kIdField,id_bytes(1));
+        std::uint64_t id = 99;
+        std::string body = "keep",error;
+        CHECK(!raft::decode_rpc_body(wire_body,id,body,error));
+        CHECK(!error.empty());
+        CHECK(id == 99 && body == "keep");
+    }
+    std::cout << "PASS rpc id payload budget: exact 17MiB accepted, one byte over refused\n";
+}
+
+// 编号拆除后，四类既有正文解码函数仍应得到原字段，不能把编号误当 term。
+void test_rpc_id_existing_body_codecs()
+{
+    std::string body,error;
+    raft::RequestVoteRequest vote;
+    vote.term = 3;
+    vote.candidate_id = 1;
+    vote.last_log_index = 7;
+    vote.last_log_term = 2;
+    CHECK(raft::encode_vote_request(vote,body,error));
+    CHECK(body.size() == 32);
+    raft::RequestVoteRequest decoded_vote;
+    CHECK(raft::decode_vote_request(rpc_roundtrip_body(RpcType::VoteRequest,42,body),
+                                   decoded_vote,error));
+    CHECK(decoded_vote.term == 3 && decoded_vote.candidate_id == 1);
+    CHECK(decoded_vote.last_log_index == 7 && decoded_vote.last_log_term == 2);
+
+    raft::RequestVoteResponse vote_reply;
+    vote_reply.term = 3;
+    vote_reply.vote_granted = true;
+    CHECK(raft::encode_vote_response(vote_reply,body,error));
+    CHECK(body.size() == 9);
+    raft::RequestVoteResponse decoded_vote_reply;
+    CHECK(raft::decode_vote_response(rpc_roundtrip_body(RpcType::VoteResponse,42,body),
+                                    decoded_vote_reply,error));
+    CHECK(decoded_vote_reply.term == 3 && decoded_vote_reply.vote_granted);
+
+    raft::AppendEntriesRequest append;
+    append.term = 3;
+    append.leader_id = 1;
+    append.prev_log_index = 7;
+    append.prev_log_term = 2;
+    append.leader_commit = 6;
+    raft::LogEntry entry;
+    entry.index = 8;
+    entry.term = 3;
+    entry.command = std::string("k\0v",3);
+    append.entries.push_back(entry);
+    CHECK(raft::encode_append_entries(append,body,error));
+    CHECK(body.size() == 44 + 12 + 3);
+    raft::AppendEntriesRequest decoded_append;
+    CHECK(raft::decode_append_entries(rpc_roundtrip_body(RpcType::AppendEntries,43,body),
+                                     decoded_append,error));
+    CHECK(decoded_append.term == 3 && decoded_append.leader_id == 1);
+    CHECK(decoded_append.prev_log_index == 7 && decoded_append.prev_log_term == 2);
+    CHECK(decoded_append.leader_commit == 6 && decoded_append.entries.size() == 1);
+    CHECK(decoded_append.entries[0].index == 0);
+    CHECK(decoded_append.entries[0].term == 3);
+    CHECK(decoded_append.entries[0].command == entry.command);
+
+    raft::AppendEntriesResponse append_reply;
+    append_reply.term = 3;
+    append_reply.success = true;
+    CHECK(raft::encode_append_response(append_reply,body,error));
+    CHECK(body.size() == 9);
+    raft::AppendEntriesResponse decoded_append_reply;
+    CHECK(raft::decode_append_response(rpc_roundtrip_body(RpcType::AppendResponse,43,body),
+                                      decoded_append_reply,error));
+    CHECK(decoded_append_reply.term == 3 && decoded_append_reply.success);
+    std::cout << "PASS rpc id integration: all four original body codecs keep their layouts\n";
+}
+
+// Hello 与两个带不同编号的相同回复粘在一起，调用方按长度切帧并分开处理。
+void test_rpc_id_sticky_with_hello()
+{
+    std::string hello_body,hello,reply_body,first,second,error;
+    CHECK(raft::encode_hello(1,hello_body,error));
+    CHECK(raft::encode_frame(RpcType::Hello,hello_body,hello,error));
+    CHECK(hello.size() == 13);
+    raft::AppendEntriesResponse reply;
+    reply.term = 3;
+    reply.success = true;
+    CHECK(raft::encode_append_response(reply,reply_body,error));
+    CHECK(raft::encode_rpc_frame(RpcType::AppendResponse,42,reply_body,first,error));
+    CHECK(raft::encode_rpc_frame(RpcType::AppendResponse,43,reply_body,second,error));
+    const std::string all = hello + first + second;
+
+    std::size_t at = 0;
+    for(std::size_t n = 0; n < 3; ++n)
+    {
+        std::size_t size = 0;
+        CHECK(raft::peek_frame_size(all.data() + at,all.size() - at,size,error));
+        CHECK(size <= all.size() - at);
+        RpcType type = RpcType::Hello;
+        std::string wire_body;
+        CHECK(raft::decode_frame(all.data() + at,size,type,wire_body,error));
+        if(n == 0)
+        {
+            std::uint64_t peer = 0;
+            CHECK(type == RpcType::Hello && size == 13);
+            CHECK(raft::decode_hello(wire_body,peer,error));
+            CHECK(peer == 1);
+        }
+        else
+        {
+            std::uint64_t id = 0;
+            std::string decoded_body;
+            CHECK(type == RpcType::AppendResponse);
+            CHECK(raft::decode_rpc_body(wire_body,id,decoded_body,error));
+            CHECK(id == (n == 1 ? 42u : 43u));
+            CHECK(decoded_body == reply_body);
+        }
+        at += size;
+    }
+    CHECK(at == all.size());
+    std::cout << "PASS rpc id stream slicing: unchanged Hello, identical replies keep ids 42 and 43\n";
+}
+
 void test_error_is_reset_on_success()
 {
     std::string frame, error = "previous failure";
@@ -319,6 +592,13 @@ int main()
     test_hello_frame();
     test_sticky_frames_must_be_sliced();
     test_error_is_reset_on_success();
+    test_rpc_id_golden_bytes();
+    test_rpc_id_roundtrip();
+    test_rpc_id_invalid_encode();
+    test_rpc_id_invalid_decode();
+    test_rpc_id_payload_limit();
+    test_rpc_id_existing_body_codecs();
+    test_rpc_id_sticky_with_hello();
 
     std::cout << "raft rpc frame codec PASS (pure functions; no sockets)\n";
     return 0;

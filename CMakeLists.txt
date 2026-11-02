@@ -35,6 +35,17 @@ ${STORAGE_SRC}
 ${PROTO_SRC}
 ${APP_SRC})
 target_link_libraries(kvserver PRIVATE Threads::Threads)   #StorageWorker 的后台线程
+# kvserver 的 Raft 模式使用正式 Worker/网络/持久化实现。
+target_sources(kvserver PRIVATE
+    src/raft/worker.cpp
+    src/raft/config.cpp
+    src/raft/core.cpp
+    src/raft/apply.cpp
+    src/raft/state.cpp
+    src/raft/logstore.cpp
+    src/raft/transport.cpp
+    src/raft/rpc_codec.cpp
+    src/raft/rpc_validate.cpp)
 
 add_executable(kvclient
 src/tools/client.cpp
@@ -201,6 +212,24 @@ add_executable(test_raft_transport
     src/raft/core.cpp
     src/storage/record.cpp)
 target_include_directories(test_raft_transport PRIVATE src)
+target_link_options(test_raft_transport PRIVATE
+    "-Wl,--wrap=send" "-Wl,--wrap=connect")
+
+# M7：Worker 启动恢复、缺失/损坏文件拒绝与数据目录排他锁
+add_executable(test_raft_worker_init
+    tests/test_raft_worker_init.cpp
+    src/raft/worker.cpp
+    src/raft/apply.cpp
+    src/raft/config.cpp
+    src/raft/core.cpp
+    src/raft/state.cpp
+    src/raft/logstore.cpp
+    src/raft/transport.cpp
+    src/raft/rpc_codec.cpp
+    src/raft/rpc_validate.cpp
+    src/storage/record.cpp)
+target_include_directories(test_raft_worker_init PRIVATE src)
+target_link_libraries(test_raft_worker_init PRIVATE Threads::Threads)
 
 
 # M5：可控消息队列、3/5 Core对象、真实Raft存储重启与发布顺序
@@ -212,3 +241,25 @@ add_executable(test_raft_core_scenarios
     src/raft/logstore.cpp
     src/storage/record.cpp)
 target_include_directories(test_raft_core_scenarios PRIVATE src)
+
+# M7：实际 Worker 线程测试和真实进程测试驱动，共用生产源码
+set(RAFT_WORKER_TEST_SRC
+    src/raft/worker.cpp
+    src/raft/config.cpp
+    src/raft/core.cpp
+    src/raft/apply.cpp
+    src/raft/state.cpp
+    src/raft/logstore.cpp
+    src/raft/transport.cpp
+    src/raft/rpc_codec.cpp
+    src/raft/rpc_validate.cpp
+    src/storage/record.cpp)
+add_executable(test_raft_worker_live
+    tests/test_raft_worker_live.cpp ${RAFT_WORKER_TEST_SRC})
+target_include_directories(test_raft_worker_live PRIVATE src)
+target_link_libraries(test_raft_worker_live PRIVATE Threads::Threads)
+target_link_options(test_raft_worker_live PRIVATE "-Wl,--wrap=epoll_wait")
+add_executable(raft_worker_node
+    tests/raft_worker_node.cpp ${RAFT_WORKER_TEST_SRC})
+target_include_directories(raft_worker_node PRIVATE src)
+target_link_libraries(raft_worker_node PRIVATE Threads::Threads)
