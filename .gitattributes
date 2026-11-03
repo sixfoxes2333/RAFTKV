@@ -1,4 +1,0 @@
-# 语言统计口径：Python 只是测试脚手架，实现全部是 C++17
-# GitHub 的语言栏按【字节】统计；把 tests/ 下的 Python 从统计里排除，
-# 文件本身仍在仓库里，clone 后 `bash tests/run_all.sh` 照常可跑。
-tests/*.py  -linguist-detectable

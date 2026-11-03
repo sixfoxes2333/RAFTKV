@@ -15,19 +15,21 @@
 kill -9 %1 && ./build/kvserver /tmp/db.data &   # 重启后数据仍在
 ```
 
-Raft 运行层的独立验收（脚本自行创建节点目录和互不重复的端口）：
+Raft 模式的三进程验收（纯 C++，自动分配端口并清理进程）：
 
 ```bash
-python3 tests/raft_server_startup_test.py
-python3 tests/raft_server_cluster_test.py
+./build/cluster_test ./build/kvserver
 ```
 
-手动运行需配置 `KV_PORT`、`KV_RAFT_ID`、`KV_RAFT_PEERS`、`KV_RAFT_DATA`。Raft 数据目录须已存在，PEERS 包含自己，Raft 监听端口从自身条目取得；不使用独立的 KV_RAFT_PORT。单机启动时不设置三个 KV_RAFT_* 变量。
+手工起单个 Raft 节点需要四个环境变量：`KV_PORT`、`KV_RAFT_ID`、`KV_RAFT_PEERS`、`KV_RAFT_DATA`。
+Raft 数据目录须已存在，PEERS 包含自己且格式为 `id@host:port`，Raft 监听端口从自己那条取得（没有独立的 KV_RAFT_PORT）。不设这三个 `KV_RAFT_*` 变量即为单机模式。
+
 ---
+
 
 ## 1. 架构
 
-下图为单机 KV 路径。Raft 模式由独立 RaftWorker 拥有 Core/存储/transport，客户端 Reactor 通过加锁快照观察状态；KV 提案/apply 在 M8 接入。
+下图为单机 KV 路径。Raft 模式由独立 RaftWorker 拥有 Core/存储/transport，客户端 Reactor 通过加锁快照观察状态；客户端请求经日志提交后由派生 KV 执行，结果回传给原连接。
 
 ```text
                     ┌───────────────────────── Reactor 线程 ─────────────────────────┐
@@ -158,7 +160,7 @@ Reactor 线程只做协议解析和投递，`Storage` 只被 worker 线程访问
 peer_closed && out_ 为空 && pending_requests == 0
 ```
 
-（这条 bug 被 `net_halfclose_flush_test.py` 逮到，而它的注释在四天前就预言了这个场景。）
+（这条 bug 被当时的半关闭大回复用例逮到，而它的注释在四天前就预言了这个场景。）
 
 ### 2.8 回复顺序 = 请求顺序（异步化之后必须显式保证）
 
@@ -256,8 +258,7 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 真正的上限要开流水线才量得出来（这台机器上 p=64、`off` 模式约 **124k ops/s**；此时 Reactor 线程已 100%，见 §5）。
 
 （历史：缺 `TCP_NODELAY` 时，同一口径 p=16 C=1 只有约 300 ops/s —— Nagle 与延迟 ACK 把
-小回复攒住 40ms。加一行 `setsockopt(TCP_NODELAY)` 之后是 51 343。围栏 `net_nodelay_test.py`
-要求"流水线吞吐 ≥ 2× 闭环"，实测比值 8.9。）
+小回复攒住 40ms。加一行 `setsockopt(TCP_NODELAY)` 之后是 51 343。当时的围栏要求"流水线吞吐 ≥ 2× 闭环"，实测比值 8.9。）
 
 ### 3.3 混合与其他
 
@@ -346,7 +347,7 @@ ctest --test-dir build --output-on-failure    # 29 个目标
 10. **半条帧超时粒度 1s**：靠 `epoll_wait` 的 1s 周期扫描实现，所以 800ms 的超时会在大约 1s 内生效。
 11. **三种提交模式已实现**（`KV_SYNC_MODE=always|everysec|off`，默认 `always`）：
     `always` = 回复前这批必须落盘；`everysec` = 最多每秒落一次（契约"最多丢 1 秒"）；`off` = 只用于对照实验。
-    非法取值拒绝启动。该设置只控制单机模式；Raft HardState/日志的同步不受它影响，KV apply 策略在 M8 确定。
+    非法取值拒绝启动。该设置只控制单机模式；Raft HardState/日志按自身路径同步落盘，派生 KV 用 `Off`（持久性由 Raft 日志与多数派保证）。
 12. **测试范围**：仓库内只有 C++ 单测与一个三进程集群测试；网络背压/半帧超时/崩溃与故障注入那些场景原先由 Python + `LD_PRELOAD` 注入器驱动，已从仓库移除（仍在 git 历史中）。所以 §3.4 的部分结论没有可重复执行的围栏。
 13. **封版前资源整改仍未完成**：GET 完成结果与 Buffer 保留容量尚未被请求/未消费输入预算完整覆盖；Raft transport 的发送预算、连接/帧超时等仍有待办。
 
@@ -376,7 +377,7 @@ README.md
 
 1. ~~**group commit**~~ ✅ 已完成（`storage-v1.2`）：一次 fsync 提交一批，写入 170 → 10 281 ops/s
    （`always`）/ 98 210 ops/s（`everysec`），单条延迟不变（见 §2.10 / §3.1）。
-2. **Raft**：M1–M8 已通过相应验收，M9 故障验收已覆盖进程级故障；封 `raft-v1` 前仍需处理 check-quorum、客户端请求去重、快照/日志压缩与集群级磁盘故障注入。
+2. **Raft**：M1–M9 已通过各自验收并封 `raft-v1`（含 check-quorum 与客户端有界失败）。下一轮优先级：Raft 日志侧批量组提交 → 客户端请求去重 → 日志截断/快照（需 baseIndex 与 InstallSnapshot）→ 集群级磁盘故障注入。
 3. 可靠性验证：网络分区/丢包/重排、客户端请求去重、线性一致性检查。
 4. 快照与日志压缩；ReadIndex / Lease Read 优化只读。
 5. 多 Reactor（提高读上限）与存储引擎接口化 + compaction，必要时对比 LSM 后端。
