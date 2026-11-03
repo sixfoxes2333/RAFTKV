@@ -5,8 +5,8 @@
 //
 // 端口用 bind(0) 让内核分配，避免和 9006 或别的测试撞。
 
-#include "raft/rpc_codec.h"
-#include "raft/transport.h"
+#include "raft/protocol/rpc_codec.h"
+#include "raft/transport/transport.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>

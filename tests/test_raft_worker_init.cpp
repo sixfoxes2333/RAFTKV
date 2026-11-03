@@ -1,5 +1,5 @@
 // M7 启动恢复：真实 StateStore/LogStore 和目录锁；本测试不启动网络或后台线程。
-#include "raft/worker.h"
+#include "raft/node/worker.h"
 
 #include <cerrno>
 #include <cstdlib>

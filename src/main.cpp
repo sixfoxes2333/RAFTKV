@@ -1,7 +1,7 @@
 #include "net/reactor.h"
 #include "app/storage_worker.h"
 #include "net/protocol.h"
-#include "raft/worker.h"
+#include "raft/node/worker.h"
 #include<sys/socket.h>
 #include<netinet/in.h>
 #include<netinet/tcp.h>

@@ -1,4 +1,4 @@
-#include "raft/core.h"
+#include "raft/core/core.h"
 
 #include <cstdlib>
 #include <iostream>

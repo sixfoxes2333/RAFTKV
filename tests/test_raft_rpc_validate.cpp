@@ -5,9 +5,9 @@
 //   后半：真实存储 + 真实 Core，证明"绕过校验会发生什么"
 // 前半故意不用 fail-fast，因为同时可能有几条规则写错。
 
-#include "raft/apply.h"
-#include "raft/logview.h"
-#include "raft/rpc_validate.h"
+#include "raft/core/apply.h"
+#include "raft/core/logview.h"
+#include "raft/protocol/rpc_validate.h"
 
 #include <cstdlib>
 #include <filesystem>

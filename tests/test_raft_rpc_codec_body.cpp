@@ -3,7 +3,7 @@
 // 大端拆解全部手写在测试里，不调生产代码：
 // 否则"用被测函数验证被测函数"，一起错也看不出来。
 
-#include "raft/rpc_codec.h"
+#include "raft/protocol/rpc_codec.h"
 
 #include <cstddef>
 #include <cstdint>

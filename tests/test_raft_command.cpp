@@ -1,6 +1,6 @@
 // M8：实际日志命令编解码；黄金字节不调用生产编码工具生成。
-#include "raft/command.h"
-#include "raft/logstore.h"
+#include "raft/protocol/command.h"
+#include "raft/core/logstore.h"
 #include "base/limits.h"
 #include <cstdint>
 #include <cstdlib>

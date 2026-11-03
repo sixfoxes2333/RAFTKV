@@ -1,6 +1,6 @@
 // M8：状态机只执行连续已提交命令，执行完才推进 lastApplied。
-#include "raft/state_machine.h"
-#include "raft/command.h"
+#include "raft/node/state_machine.h"
+#include "raft/protocol/command.h"
 #include <chrono>
 #include <cstdlib>
 #include <iostream>

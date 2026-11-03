@@ -1,6 +1,6 @@
 // M7：实际 Worker 后台线程、真实 TCP 和持久化失败围栏；不执行 KV。
-#include "raft/worker.h"
-#include "raft/rpc_codec.h"
+#include "raft/node/worker.h"
+#include "raft/protocol/rpc_codec.h"
 
 #include <arpa/inet.h>
 #include <atomic>

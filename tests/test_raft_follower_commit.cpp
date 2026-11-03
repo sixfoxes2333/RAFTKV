@@ -1,5 +1,5 @@
-#include "raft/apply.h"
-#include "raft/logview.h"
+#include "raft/core/apply.h"
+#include "raft/core/logview.h"
 
 #include <cstdlib>
 #include <filesystem>

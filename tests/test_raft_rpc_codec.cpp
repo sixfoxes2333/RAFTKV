@@ -1,4 +1,4 @@
-#include "raft/rpc_codec.h"
+#include "raft/protocol/rpc_codec.h"
 
 #include <cstddef>
 #include <cstdint>

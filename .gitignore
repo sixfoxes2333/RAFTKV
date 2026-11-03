@@ -1,10 +1,19 @@
+# 只保留源码与测试；仓库里只看得到
+#   src/  tests/  CMakeLists.txt  README.md
 build/
+*.data
+kvdb.data
 kvserver
 
-# 运行时数据文件（服务器默认 db 路径 / 手动冒烟留下的）
-kvdb.data
-*.data
+# 编辑器 / IDE 本地配置
+.vscode/
+.idea/
+*.user
 
-# Python 测试产生的缓存
+# Python 脚手架缓存（测试改为纯 C++ 后仅剩少量工具脚本）
 __pycache__/
 *.pyc
+
+# 运行时产物
+*.log
+*.tmp

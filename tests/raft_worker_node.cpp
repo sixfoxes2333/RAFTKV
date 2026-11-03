@@ -1,5 +1,5 @@
 // M7 进程夹具：只驱动仓库里的 RaftWorker，不实现另一份 Raft，也不提供 KV 服务。
-#include "raft/worker.h"
+#include "raft/node/worker.h"
 
 #include <atomic>
 #include <chrono>

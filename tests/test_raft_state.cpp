@@ -19,7 +19,7 @@
 //   这里能验证的是：文件格式、失败语义、以及改名替换的可见性；
 //   系统调用顺序（write → fsync(文件) → rename → fsync(目录)）由
 //   raft_state_fault_test.py 之外的 strace 检查覆盖。
-#include "raft/state.h"
+#include "raft/core/state.h"
 
 #include <cstdlib>
 #include <filesystem>

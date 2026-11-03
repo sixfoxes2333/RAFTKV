@@ -3,7 +3,7 @@
 // 纯字符串解析：不读环境变量（除最后一组）、不建 socket、不碰文件系统。
 // 规则用 check() 收集失败一口气报出来；只有"能否继续跑下去"的前提才用 CHECK。
 
-#include "raft/config.h"
+#include "raft/transport/config.h"
 
 #include <cstdlib>
 #include <iostream>

@@ -16,7 +16,7 @@
 //   pwrite 成功只代表进了页缓存；同进程或正常重启都看不出"没 fsync"的差别。
 //   这里验证的是格式、失败语义与恢复行为；"fsync 是否真的发生、顺序如何"
 //   由 logstore_fault_test.py 用调用计数和 strace 覆盖。
-#include "raft/logstore.h"
+#include "raft/core/logstore.h"
 
 #include <cstdint>
 #include <cstdlib>
