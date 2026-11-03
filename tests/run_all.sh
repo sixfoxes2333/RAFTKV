@@ -448,6 +448,14 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft 故障验收（日志一致/少数派拒绝/有界失败/恢复）=="
+if timeout 400 python3 tests/raft_fault_acceptance.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 拷贝/移动契约（编译期 static_assert）=="
 if ./build/test_noncopyable; then
     :

@@ -127,7 +127,7 @@ else
 fi
 
 echo "[ASan] 运行实际 kvserver 的 M7 入口与三进程验收"
-for script in raft_server_startup_test.py raft_server_cluster_test.py raft_kv_e2e_test.py; do
+for script in raft_server_startup_test.py raft_server_cluster_test.py raft_kv_e2e_test.py raft_fault_acceptance.py; do
     extra=()
     if [ "$script" = raft_server_startup_test.py ]; then
         extra+=(--skip-idle-fd)

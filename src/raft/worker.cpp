@@ -1048,6 +1048,42 @@ bool RaftWorker::pump_clients(std::string& error)
         return true;
     }
 
+    //失去多数派时 committed 不再前进：等待中的请求必须超时失败，不能永久悬挂
+    {
+        const auto now = Clock::now();
+        bool expired = false;
+
+        for(auto it = waiting_.begin(); it != waiting_.end();)
+        {
+            if(now < it->second.deadline)
+            {
+                ++it;
+                continue;
+            }
+
+            ClientResult out;
+            out.fd = it->second.fd;
+            out.connection_id = it->second.connection_id;
+            out.sequence = it->second.sequence;
+            out.bytes = it->second.bytes;
+            out.response.status = kv::Status::Error;
+
+            {
+                std::lock_guard<std::mutex> lock(client_mutex_);
+                client_in_bytes_ -= it->second.bytes;
+                answer_locked(std::move(out));
+            }
+
+            it = waiting_.erase(it);
+            expired = true;
+        }
+
+        if(expired)
+        {
+            notify_reactor();
+        }
+    }
+
     //新 leader 先提本任期 no-op，提交并执行完才放行客户端
     if(!barrier_ready_)
     {
@@ -1117,7 +1153,8 @@ bool RaftWorker::pump_clients(std::string& error)
         }
 
         waiting_[index] = Waiter{request.fd,request.connection_id,
-                                 request.sequence,term,request.bytes};
+                                 request.sequence,term,request.bytes,
+                                 Clock::now() + std::chrono::milliseconds(CLIENT_TIMEOUT_MS)};
     }
 
     return true;

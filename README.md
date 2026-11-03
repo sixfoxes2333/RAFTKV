@@ -3,10 +3,10 @@
 一个从零手写的持久化键值存储服务：epoll 事件循环 + 后台存储线程 + 二进制协议 + Bitcask 风格日志存储。
 支持 `SET` / `GET` / `DEL`；默认 `always` 模式按批 `fsync` 后确认写入，另有 `everysec/off` 模式。
 
-> 当前状态：单节点 KV 已封版（`storage-v1.2`）；Raft 的持久化、Core 与非阻塞 transport 已接入生产 RaftWorker，**M7 运行层验收通过**。
-> 11/03 完整普通回归 **47/47**，配置的 ASan/UBSan runner 通过；CRC 冷启动并发与 Worker 9 组 TSan 通过，原 StorageWorker ×5/单机 E2E TSan 也通过。覆盖范围见 §4。
-> 三个实际 `kvserver` 已验证选主、SIGKILL leader 后重选、同目录重启加入及 130 条旧日志追平。RPC ID、同连接超时换编号、旧回复过滤与高任期退位已通过实际 Worker/TCP 测试。
-> **下一步 M8：已提交 KV 执行与一致恢复。当前 Raft 模式的 KV 请求统一返回 Error，applied=0；单机模式继续支持 SET/GET/DEL。** M9 故障封版与其他已知整改仍未完成，尚无 `raft-v1`。
+> 当前状态：单节点 KV 已封版（`storage-v1.2`）；Raft 的持久化、Core、非阻塞 transport、RaftWorker 与**已提交 KV 执行**已接通。
+> 11/03 完整普通回归 **53 步通过**，配置的 ASan/UBSan runner 通过（29 个目标）；CRC 冷启动并发、Worker 9 组、原 StorageWorker ×5 与单机 E2E 的 TSan 均通过。覆盖范围见 §4。
+> 真三进程 `kvserver` 已验证：SET/GET/DEL 经 Raft 提交后执行、三节点日志逐字节一致、SIGKILL leader 后已确认写仍存在、离线节点重启追平、少数派无法确认写入、失去多数派时客户端 3s 内明确失败。
+> 尚未封 `raft-v1`：客户端错误不保证"未提交"、未实现 check-quorum/ReadIndex/快照，故障验收未包含磁盘故障注入。
 
 ```bash
 ./build/kvserver /tmp/db.data &          # 启动（默认 ./kvdb.data）
@@ -383,7 +383,8 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
    代价是打破"存储只被 worker 线程访问"这个不变量，需要分片 / RCU 之类的设计）。
    另外：C=8 × p=256 = 2048 条在途会超过 `max_pending` 1024，触发过载保护回 `Error` ——
    深管道要配合上限调整才有意义（见 §2.5）。
-5. **KV 读写仍为单机服务**：Raft 选举/复制运行层已接通，提交后 KV 执行与一致恢复待 M8；Raft 模式暂时明确拒绝 KV 请求。
+5. **Raft 模式的读写语义**：所有 SET/GET/DEL 都作为日志命令提交后执行，GET 也经共识（未实现 ReadIndex/LeaseRead，读延迟与写相同）；只有 leader 服务。
+   `Error` 只表示"没有确认成功"，**不保证命令未提交**：少数派期间的写可能在其后多数派恢复时被提交。客户端无法自动去重，重试前需自行考虑。
 6. **无认证/无 TLS**：仅适用于可信内网。
 7. **`MAX_MESSAGE` 16MB**：单条消息上限，超过则视为协议错误并关闭连接。
 8. **收包预算是"总量"而不是"公平分配"**：128MB 被半条帧吃满时，被关掉的是"正在长大的那条连接"，
@@ -415,7 +416,7 @@ CMakeLists.txt
 
 1. ~~**group commit**~~ ✅ 已完成（`storage-v1.2`）：一次 fsync 提交一批，写入 170 → 10 281 ops/s
    （`always`）/ 98 210 ops/s（`everysec`），单条延迟不变（见 §2.10 / §3.1）。
-2. **Raft**：M1–M7 主线已通过相应验收；下一步 M8 KV apply/一致恢复，再做 M9 真实读写故障验收及封版整改。
+2. **Raft**：M1–M8 已通过相应验收，M9 故障验收已覆盖进程级故障；封 `raft-v1` 前仍需处理 check-quorum、客户端请求去重、快照/日志压缩与集群级磁盘故障注入。
 3. 可靠性验证：网络分区/丢包/重排、客户端请求去重、线性一致性检查。
 4. 快照与日志压缩；ReadIndex / Lease Read 优化只读。
 5. 多 Reactor（提高读上限）与存储引擎接口化 + compaction，必要时对比 LSM 后端。

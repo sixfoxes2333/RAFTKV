@@ -177,6 +177,9 @@ private:
 
     static constexpr std::size_t MAX_CLIENT_BYTES = 16 * 1024 * 1024;
 
+    //客户端请求等待提交的上限；失去多数派时必须在这个时间内明确失败
+    static constexpr int CLIENT_TIMEOUT_MS = 3000;
+
     int wakeup_fd_ = -1; //通知 Reactor 有结果可取
 
     mutable std::mutex client_mutex_;
@@ -195,6 +198,7 @@ private:
         std::uint64_t sequence = 0;
         std::uint64_t term = 0;
         std::size_t bytes = 0;
+        Clock::time_point deadline{}; //超过这个时间仍未提交就回 Error
     };
     std::map<std::uint64_t,Waiter> waiting_;
 
