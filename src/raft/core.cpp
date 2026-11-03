@@ -132,6 +132,28 @@ void RaftCore::stop()
     stopped_ = true;
 }
 
+//check-quorum：联系不上多数派时，leader 自己退位，避免继续接受无法提交的写
+bool RaftCore::step_down(std::string& error)
+{
+    error.clear();
+
+    if(!good())
+    {
+        error = "step down : core is not usable";
+        return false;
+    }
+
+    if(role_ != Role::Leader)
+    {
+        error = "step down : core is not a leader";
+        return false;
+    }
+
+    //任期与 votedFor 保持原值：退位不等于开始了新一轮选举
+    role_ = Role::Follower;
+    return true;
+}
+
 //开始拉票 任期+1 投自己一票 进入 candidate
 bool RaftCore::start_election(ElectionOutPut& out,std::string& error)
 {

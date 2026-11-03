@@ -180,6 +180,9 @@ private:
     //客户端请求等待提交的上限；失去多数派时必须在这个时间内明确失败
     static constexpr int CLIENT_TIMEOUT_MS = 3000;
 
+    //leader 超过这个时间没有收到多数派消息就主动退位
+    static constexpr int QUORUM_TIMEOUT_MS = 1500;
+
     int wakeup_fd_ = -1; //通知 Reactor 有结果可取
 
     mutable std::mutex client_mutex_;
@@ -202,11 +205,15 @@ private:
     };
     std::map<std::uint64_t,Waiter> waiting_;
 
+    //每个 peer 最近一次有效复制回复的时间；只用来判断多数派是否还在
+    std::map<std::uint64_t,Clock::time_point> peer_contact_;
+
     std::uint64_t barrier_index_ = 0; //本任期 no-op 的日志序号
     std::uint64_t leader_term_ = 0; //当前服务客户端的 leader 任期
     bool barrier_ready_ = false; //屏障已提交且已执行
 
     void notify_reactor();
+    bool check_quorum(std::string& error); //失去多数派时退位，不再接受写
     bool pump_clients(std::string& error); //取请求，处理领导权与屏障
     bool pump_apply(std::string& error); //提交已完成日志给 KV
     bool propose_command(const std::string& command,std::uint64_t& index,std::string& error);

@@ -536,6 +536,9 @@ bool RaftWorker::handle_append_response(std::uint64_t peer,std::uint64_t rpc_id,
         sent = std::move(found->second.request);
         pending_appends_.erase(found);
 
+        //这条回复证明该 peer 在线，check-quorum 靠它续期
+        peer_contact_[peer] = Clock::now();
+
     }
 
     AppendResponseOut result;
@@ -831,6 +834,12 @@ void RaftWorker::worker_loop()
                     break;
                 }
 
+                if(!check_quorum(error))
+                {
+                    runtime_error_ = std::move(error);
+                    break;
+                }
+
                 if(core_.role() == Role::Leader)
                 {
                     if(now >= heartbeat_deadline_)
@@ -1025,6 +1034,49 @@ void RaftWorker::reject_inbox()
     notify_reactor();
 }
 
+//check-quorum：多数派联系不上就不再当 leader，避免收下无法提交的写
+bool RaftWorker::check_quorum(std::string& error)
+{
+    error.clear();
+
+    if(core_.role() != Role::Leader)
+    {
+        return true;
+    }
+
+    const auto now = Clock::now();
+    const auto window = std::chrono::milliseconds(QUORUM_TIMEOUT_MS);
+
+    //自己永远算一个；其余看最近是否收到过复制回复
+    std::size_t reachable = 1;
+
+    for(const auto& item : peer_contact_)
+    {
+        if(now - item.second <= window)
+        {
+            ++reachable;
+        }
+    }
+
+    if(reachable >= core_.majority())
+    {
+        return true;
+    }
+
+    //主动退位：同任期转 Follower，随后由选举超时决定是否重新竞选
+    if(!core_.step_down(error))
+    {
+        return false;
+    }
+
+    abort_waiting();
+    barrier_ready_ = false;
+    barrier_index_ = 0;
+    leader_term_ = 0;
+    reset_election_timer();
+    return true;
+}
+
 //领导权变化、屏障和提案都在这里决定；返回 false 表示必须停止
 bool RaftWorker::pump_clients(std::string& error)
 {
@@ -1032,6 +1084,17 @@ bool RaftWorker::pump_clients(std::string& error)
 
     const bool leader = (core_.role() == Role::Leader);
     const std::uint64_t term = core_.hard_state().current_term;
+
+    //新任期当选：先给每个 peer 一个选举超时的宽限，之后靠真实回复续期
+    if(leader && term != leader_term_)
+    {
+        const auto now = Clock::now();
+
+        for(const auto& peer : config_.peers)
+        {
+            peer_contact_[peer.id] = now;
+        }
+    }
 
     //换届或退位：旧的等待上下文已经不可能由本次 leader 完成
     if(!leader || term != leader_term_)

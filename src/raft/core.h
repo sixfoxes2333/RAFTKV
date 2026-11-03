@@ -220,6 +220,9 @@ public:
     //讲一条命令组装为待保存的日志
     bool build_proposal(const std::string& command,LogEntry& out,std::string& error)const;
 
+    //leader 长时间联系不上多数派时主动退位；任期和投票都不变
+    bool step_down(std::string& error);
+
     //leader 检查多数派进度，更新 commitIndex 并输出新增已提交区间
     bool advance_commit(CommitOut& out,std::string& error);
 

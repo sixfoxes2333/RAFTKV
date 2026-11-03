@@ -160,9 +160,20 @@ def run(binary, work, artifacts):
         for node_id, node in cluster.nodes.items():
             if node_id != keeper:
                 node.kill()
+        waiting = time.monotonic() + 6
+        role = None
+        while time.monotonic() < waiting:
+            rows = cluster.rows()
+            if rows:
+                role = rows[0]["role"]
+                if role != "leader":
+                    break
+            time.sleep(0.05)
+        #check-quorum：联系不上多数派的 leader 必须主动退位
+        assert role != "leader", f"lone leader kept claiming leadership: {role}"
         waited = expect_error_within(cluster.client_ports[keeper])
-        evidence["no_quorum"] = dict(node=keeper, seconds=round(waited, 2))
-        print(f"PASS m9: single surviving node failed reads within {waited:.2f}s", flush=True)
+        evidence["no_quorum"] = dict(node=keeper, role=role, seconds=round(waited, 2))
+        print(f"PASS m9: lone leader stepped down and failed reads within {waited:.2f}s", flush=True)
 
         for node_id, node in cluster.nodes.items():
             if not node.expected_alive:

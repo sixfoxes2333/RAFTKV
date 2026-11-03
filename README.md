@@ -6,7 +6,8 @@
 > 当前状态：单节点 KV 已封版（`storage-v1.2`）；Raft 的持久化、Core、非阻塞 transport、RaftWorker 与**已提交 KV 执行**已接通。
 > 11/03 完整普通回归 **53 步通过**，配置的 ASan/UBSan runner 通过（29 个目标）；CRC 冷启动并发、Worker 9 组、原 StorageWorker ×5 与单机 E2E 的 TSan 均通过。覆盖范围见 §4。
 > 真三进程 `kvserver` 已验证：SET/GET/DEL 经 Raft 提交后执行、三节点日志逐字节一致、SIGKILL leader 后已确认写仍存在、离线节点重启追平、少数派无法确认写入、失去多数派时客户端 3s 内明确失败。
-> 尚未封 `raft-v1`：客户端错误不保证"未提交"、未实现 check-quorum/ReadIndex/快照，故障验收未包含磁盘故障注入。
+> 已实现 **check-quorum**（1.5s 收不到多数派消息就主动退位）：少数派期间的写在恢复后不再被提交，孤立 leader 立即拒绝服务。
+> 尚未封 `raft-v1`：客户端 `Error` 仍不保证"未提交"（leader 退位前的在途写可能已复制）、未实现 ReadIndex/快照/请求去重，故障验收未包含磁盘故障注入。
 
 ```bash
 ./build/kvserver /tmp/db.data &          # 启动（默认 ./kvdb.data）
@@ -384,7 +385,7 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
    另外：C=8 × p=256 = 2048 条在途会超过 `max_pending` 1024，触发过载保护回 `Error` ——
    深管道要配合上限调整才有意义（见 §2.5）。
 5. **Raft 模式的读写语义**：所有 SET/GET/DEL 都作为日志命令提交后执行，GET 也经共识（未实现 ReadIndex/LeaseRead，读延迟与写相同）；只有 leader 服务。
-   `Error` 只表示"没有确认成功"，**不保证命令未提交**：少数派期间的写可能在其后多数派恢复时被提交。客户端无法自动去重，重试前需自行考虑。
+   `Error` 只表示"没有确认成功"，**不保证命令未提交**：写可能在 leader 退位前已经复制到多数派。客户端没有请求去重，重试前需自行考虑。
 6. **无认证/无 TLS**：仅适用于可信内网。
 7. **`MAX_MESSAGE` 16MB**：单条消息上限，超过则视为协议错误并关闭连接。
 8. **收包预算是"总量"而不是"公平分配"**：128MB 被半条帧吃满时，被关掉的是"正在长大的那条连接"，
