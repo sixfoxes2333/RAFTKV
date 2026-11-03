@@ -70,6 +70,8 @@ echo "[ASan] 运行存储单元测试"
 run_bin test_storage
 echo "[ASan] 运行存储恢复测试"
 run_bin test_recovery
+echo "[ASan] 运行 CRC 首次调用并发回归"
+run_bin test_crc32_threads
 echo "[ASan] 运行类型契约测试（编译期断言，顺带确认可执行）"
 run_bin test_noncopyable
 
@@ -117,6 +119,22 @@ else
     tail -20 "$RAFT_PROCESS_LOG"
     fail=1
 fi
+
+echo "[ASan] 运行实际 kvserver 的 M7 入口与三进程验收"
+for script in raft_server_startup_test.py raft_server_cluster_test.py; do
+    extra=()
+    if [ "$script" = raft_server_startup_test.py ]; then
+        extra+=(--skip-idle-fd)
+    fi
+    log="/tmp/kv_asan_${script%.py}.log"
+    if timeout 90 python3 "$REPO/tests/$script" --binary "$BUILD/kvserver" "${extra[@]}" > "$log" 2>&1; then
+        echo "       $script 退出码 0（检查子进程 sanitizer 日志）"
+    else
+        echo "       !! $script 失败："
+        tail -20 "$log"
+        fail=1
+    fi
+done
 
 # ---- 3. 网络场景：背压（写满 → EAGAIN → 短写续写），必须真的跑起来 ----
 export KV_SERVER="$BUILD/kvserver"

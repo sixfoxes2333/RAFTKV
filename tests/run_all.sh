@@ -63,6 +63,14 @@ else
 fi
 
 echo
+echo "== $((++STEP)) CRC 首次调用并发（8线程同时建表、独立黄金值）=="
+if timeout 30 ./build/test_crc32_threads; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 半关闭回归（小消息）=="
 if python3 tests/net_halfclose_test.py; then
     :
@@ -386,6 +394,22 @@ fi
 echo
 echo "== $((++STEP)) RaftWorker 三进程（心跳/kill -9 重选/重启/130条追平）=="
 if timeout 90 python3 tests/raft_worker_process_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) kvserver Raft 入口（状态/信号/预留fd/失败传播/坏配置）=="
+if timeout 90 python3 tests/raft_server_startup_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) kvserver 三进程（选主/重选/重启/追平与KV入口门控）=="
+if timeout 90 python3 tests/raft_server_cluster_test.py; then
     :
 else
     fail=$((fail + 1))

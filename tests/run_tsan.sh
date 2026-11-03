@@ -52,12 +52,14 @@ echo
 echo "== 服务器端到端（Reactor 线程 ⇄ worker 线程）=="
 g++ -std=c++17 -Wall -Wextra -fsanitize=thread -g -O1 -Isrc -pthread \
     src/main.cpp \
+    src/raft/worker.cpp src/raft/config.cpp src/raft/core.cpp \
+    src/raft/apply.cpp src/raft/state.cpp src/raft/logstore.cpp \
+    src/raft/transport.cpp src/raft/rpc_codec.cpp src/raft/rpc_validate.cpp \
     src/net/reactor.cpp src/net/connection.cpp src/base/buffer.cpp \
     src/storage/storage.cpp src/storage/record.cpp \
     src/net/protocol.cpp src/app/storage_worker.cpp \
     -o "$OUT/kvserver_tsan" || exit 1
 
-pkill -f kvserver_tsan 2>/dev/null; sleep 0.3
 rm -f /tmp/kv_e2e.log /tmp/kv_e2e.data
 # 服务器进程同样要关 ASLR（WSL 下 TSan 的 shadow memory 与地址随机化冲突）
 cat > "$OUT/kvserver_tsan_wrap.sh" <<EOF

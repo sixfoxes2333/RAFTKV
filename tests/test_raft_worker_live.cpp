@@ -125,6 +125,7 @@ bool wait_for(Predicate predicate,int milliseconds = 8000)
 struct RawPeer
 {
     int fd = -1;
+    std::string input;
     explicit RawPeer(std::uint16_t port)
     {
         fd = ::socket(AF_INET,SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0);
@@ -157,6 +158,43 @@ struct RawPeer
         }
         CHECK(at == bytes.size());
     }
+    //读取一条真实 TCP 帧；超时返回 false，EOF 或坏帧直接使测试失败。
+    bool receive_packet(RpcType& type,std::uint64_t& id,std::string& body,int timeout_ms)
+    {
+        const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
+        std::string error;
+        while(Clock::now() < deadline)
+        {
+            if(input.size() >= 4)
+            {
+                std::size_t size = 0;
+                CHECK(raft::peek_frame_size(input.data(),input.size(),size,error));
+                if(size != 0 && input.size() >= size)
+                {
+                    std::string wire;
+                    CHECK(raft::decode_frame(input.data(),size,type,wire,error));
+                    input.erase(0,size);
+                    id = 0;
+                    if(type == RpcType::Hello) body = std::move(wire);
+                    else CHECK(raft::decode_rpc_body(wire,id,body,error));
+                    return true;
+                }
+            }
+            char buffer[4096];
+            const auto count = ::recv(fd,buffer,sizeof(buffer),0);
+            if(count > 0)
+            {
+                input.append(buffer,static_cast<std::size_t>(count));
+                continue;
+            }
+            if(count < 0 && errno == EINTR) continue;
+            CHECK(count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+            pollfd event{fd,POLLIN,0};
+            CHECK(::poll(&event,1,10) >= 0);
+        }
+        return false;
+    }
+
     std::string until_closed()
     {
         std::string bytes;
@@ -461,6 +499,100 @@ std::size_t fd_count()
     return count;
 }
 
+//同一条 TCP 上超时换编号；旧普通回复不能消费新请求，更高任期仍须处理。
+void test_rpc_timeout_and_late_replies()
+{
+    Fixture fixture;
+    std::string error;
+    {
+        raft::StateStore state(fixture.dir.path);
+        CHECK(state.save(raft::HardState{1,0},error));
+        raft::LogStore log(fixture.dir.path);
+        CHECK(log.create(error));
+        CHECK(log.append_batch({{1,1,"one"},{2,1,"two"},{3,1,"three"}},error));
+    }
+    RaftWorker worker(fixture.config(3));
+    CHECK(worker.init(error));
+    fixture.ports[2].release();
+    CHECK(worker.start(error));
+    RawPeer peer(fixture.ports[2].number);
+    std::string hello_body,hello;
+    CHECK(raft::encode_hello(1,hello_body,error));
+    CHECK(raft::encode_frame(RpcType::Hello,hello_body,hello,error));
+    peer.send_all(hello);
+
+    RpcType type = RpcType::Hello;
+    std::uint64_t id = 0;
+    std::string body;
+    CHECK(peer.receive_packet(type,id,body,3000) && type == RpcType::Hello);
+    CHECK(peer.receive_packet(type,id,body,3000) && type == RpcType::VoteRequest);
+    raft::RequestVoteRequest vote;
+    CHECK(raft::decode_vote_request(body,vote,error));
+    const auto vote_id = id;
+
+    //回包仍经正式 codec/socket，Worker 自己判断编号和计票。
+    const auto reply = [&](RpcType rpc_type,std::uint64_t rpc_id,const std::string& payload)
+    {
+        std::string frame;
+        CHECK(raft::encode_rpc_frame(rpc_type,rpc_id,payload,frame,error));
+        peer.send_all(frame);
+    };
+    raft::RequestVoteResponse granted{vote.term,true};
+    CHECK(raft::encode_vote_response(granted,body,error));
+    reply(RpcType::VoteResponse,vote_id + 10000,body);
+    CHECK(!peer.receive_packet(type,id,body,150));
+    CHECK(worker.status().role == raft::Role::Candidate);
+    CHECK(raft::encode_vote_response(granted,body,error));
+    reply(RpcType::VoteResponse,vote_id,body);
+    CHECK(wait_for([&] { return worker.status().role == raft::Role::Leader; }));
+
+    CHECK(peer.receive_packet(type,id,body,2000) && type == RpcType::AppendEntries);
+    const auto old_id = id;
+    raft::AppendEntriesRequest original;
+    CHECK(raft::decode_append_entries(body,original,error));
+    CHECK(original.prev_log_index == 3 && original.entries.empty());
+
+    //不回复，等待同一连接上的超时替换请求。
+    CHECK(peer.receive_packet(type,id,body,2000) && type == RpcType::AppendEntries);
+    const auto replacement_id = id;
+    CHECK(replacement_id > old_id);
+    raft::AppendEntriesRequest replacement;
+    CHECK(raft::decode_append_entries(body,replacement,error));
+    CHECK(replacement.term == original.term && replacement.prev_log_index == 3);
+    raft::AppendEntriesResponse nack{original.term,false};
+    CHECK(raft::encode_append_response(nack,body,error));
+    reply(RpcType::AppendResponse,old_id,body);
+    CHECK(!peer.receive_packet(type,id,body,150));
+
+    //新编号的 NACK 才能后退，证明迟到旧 NACK 未消费新在途上下文。
+    CHECK(raft::encode_append_response(nack,body,error));
+    reply(RpcType::AppendResponse,replacement_id,body);
+    CHECK(peer.receive_packet(type,id,body,1000) && type == RpcType::AppendEntries);
+    raft::AppendEntriesRequest backed_off;
+    CHECK(raft::decode_append_entries(body,backed_off,error));
+    CHECK(backed_off.prev_log_index == 2 && backed_off.entries.size() == 1);
+    CHECK(backed_off.entries[0].command == "three");
+    raft::AppendEntriesResponse late_success{original.term,true};
+    CHECK(raft::encode_append_response(late_success,body,error));
+    reply(RpcType::AppendResponse,old_id,body);
+    CHECK(!peer.receive_packet(type,id,body,220));
+
+    //同一个旧编号携带更高任期，仍必须持久化退位。
+    late_success.term = 77;
+    CHECK(raft::encode_append_response(late_success,body,error));
+    reply(RpcType::AppendResponse,old_id,body);
+    CHECK(wait_for([&]
+    {
+        const auto status = worker.status();
+        return status.running && status.term == 77 && status.role == raft::Role::Follower;
+    }));
+    worker.stop();
+    const auto saved = disk_state(fixture.dir.path);
+    CHECK(saved.current_term == 77 && saved.voted_for == 0);
+    CHECK(worker.status().commit == 0 && worker.status().last == 3);
+    std::cout << "PASS worker live: vote IDs, long-connection timeout replacement, late NACK/success and higher-term stepdown\n";
+}
+
 void test_repeated_thread_cleanup()
 {
     Fixture fixture;
@@ -490,5 +622,6 @@ int main()
     test_self_vote_save_failure();
     test_follower_save_failure_no_ack();
     test_repeated_thread_cleanup();
+    test_rpc_timeout_and_late_replies();
     std::cout << "raft worker live PASS (actual threads and TCP; no KV apply)\n";
 }

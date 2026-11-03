@@ -263,3 +263,9 @@ add_executable(raft_worker_node
     tests/raft_worker_node.cpp ${RAFT_WORKER_TEST_SRC})
 target_include_directories(raft_worker_node PRIVATE src)
 target_link_libraries(raft_worker_node PRIVATE Threads::Threads)
+
+# CRC 首次调用并发回归：进程放行 8 个线程前不预热 crc32。
+add_executable(test_crc32_threads
+    tests/test_crc32_threads.cpp src/storage/record.cpp)
+target_include_directories(test_crc32_threads PRIVATE src)
+target_link_libraries(test_crc32_threads PRIVATE Threads::Threads)

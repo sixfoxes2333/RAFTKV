@@ -446,152 +446,416 @@ void handle_storage_events(Connection* w)
 
 }
 
+//main 启动时读取客户端端口，未配置则沿用 9006
+bool load_client_port(std::uint16_t& out,std::string& error)
+{
+    error.clear();
+
+    std::uint32_t value = 9006;
+
+    if(const char* text = std::getenv("KV_PORT"))
+    {
+        const char* end = text + std::strlen(text);
+        const auto result = std::from_chars(text,end,value);
+
+        if(result.ec != std::errc{} || result.ptr != end || value == 0 || value > 65535)
+        {
+            error = "invalid KV_PORT (expect 1..65535)";
+            return false;
+        }
+    }
+
+    out = static_cast<std::uint16_t>(value);
+    return true;
+
+}
+
+//输出状态行时，把 core 的角色转换为可识别脚本
+const char* raft_role_name(raft::Role role)
+{
+    switch(role)
+    {
+        case raft::Role::Follower: return "follower";
+        case raft::Role::Candidate: return "candidate";
+        case raft::Role::Leader: return "leader";
+    }
+
+    return "unknown";
+}
+
+//主线程输出后台快照
+void print_raft_status(std::uint64_t id,const raft::RaftWorker::Status& status)
+{
+    std::cout << "RAFTSTATUS id=" << id
+                << " role=" << raft_role_name(status.role)
+                << " term=" << status.term
+                << " commit=" << status.commit
+                << " last=" << status.last
+                << " applied=0"
+                << " pid=" << ::getpid()
+                << " running=" << (status.running ? 1 : 0)
+                << " updated_ms=" << status.updated_ms
+                << std::endl;
+}
+
+//main 注册控制 fd ，信号使 reactor 退出，定时器检查 raft 后台状态
+bool install_control_events(Reactor& reactor,const sigset_t& signals,raft::RaftWorker* worker,std::uint64_t id,std::string& error)
+{
+    error.clear();
+
+    int fd = signalfd(-1,&signals,SFD_NONBLOCK | SFD_CLOEXEC);
+
+    if(fd < 0)
+    {
+        error = std::string("signalfd : ") + std::strerror(errno);
+        return false;
+    }
+
+    auto signal_conn = std::make_unique<Connection>(fd,&reactor);
+
+    //信号已被阻塞，由主线程通过 signalfd 读取并停止事件循环
+    signal_conn->on_read = [](Connection* c)
+    {
+        signalfd_siginfo info{};
+        ssize_t n;
+        do
+        {
+            n = ::read(c->fd(),&info,sizeof(info));
+        }
+        while(n < 0 && errno == EINTR);
+        
+        if(n == static_cast<ssize_t>(sizeof(info)))
+        {
+            c->reactor()->stop();
+            return;
+        }
+
+        if(n < 0 && errno == EAGAIN)
+        {
+            return;
+        }
+
+        std::cerr << "signalfd read failed" << std::endl;
+        g_fatal = true;
+        c->reactor()->stop();
+    };
+
+    if(!reactor.add_connection(fd,std::move(signal_conn),EPOLLIN))
+    {
+        error = "register signal fd failed";
+        return false;
+    }
+
+    if(worker == nullptr)
+    {
+        return true;
+    }
+
+    fd = timerfd_create(CLOCK_MONOTONIC,TFD_NONBLOCK | TFD_CLOEXEC);
+
+    if(fd < 0)
+    {
+        error = std::string("timefd_create : ") + std::strerror(errno);
+        return false;
+    }
+
+    auto timer_conn = std::make_unique<Connection>(fd,&reactor);
+
+    itimerspec timer{};
+    timer.it_value.tv_nsec = 200 * 1000 * 1000;
+    timer.it_interval = timer.it_value;
+
+    if(timerfd_settime(fd,0,&timer,nullptr) < 0)
+    {
+        error = std::string("timerfd_settime : ") + std::strerror(errno);
+        return false;
+    }
+
+    //每 200 ms 读取一次加锁快照
+    timer_conn->on_read = [worker,id](Connection* c)
+    {
+        std::uint64_t ticks = 0;
+        ssize_t n;
+        do
+        {
+            n = ::read(c->fd(),&ticks,sizeof(ticks));
+        }
+        while(n < 0 && errno == EINTR);
+
+        if(n < 0 && errno == EAGAIN)
+        {
+            return;
+        }
+
+        if(n != static_cast<ssize_t>(sizeof(ticks)))
+        {
+            std::cerr << "timerfd read failed" << std::endl;
+            g_fatal = true;
+            c->reactor()->stop();
+            return;
+        }
+
+        const auto status = worker->status();
+        print_raft_status(id,status);
+
+        if(!status.running)
+        {
+            std::cerr << "raft worker unavailable : " << status.error << std::endl;
+            g_fatal = true;
+            c->reactor()->stop();
+        }
+
+    };
+
+    if(!reactor.add_connection(fd,std::move(timer_conn),EPOLLIN))
+    {
+        error = "register raft timer fd failed";
+        return false;
+    }
+
+    return true;
+
+}
+
+
 
 int main(int argc,char* argv[])
 {
+    std::string error;
+    std::uint16_t client_port = 9006;
 
-    //数据库默认路径
-    const char* db_path = (argc > 1) ? argv[1] : "kvdb.data";
 
-    kv::StorageWorker::SyncMode sync_mode = kv::StorageWorker::SyncMode::Always;
-    const char* sync_mode_name = "always";
-
-    if(const char* p = getenv("KV_SYNC_MODE"))
+    if(!load_client_port(client_port,error))
     {
-        std::string m = p;
-        if(m == "always")
+        std::cerr << error << std::endl;
+        return 1;
+    }
+
+    //出现任意 raft 配置则检查全部必填项
+    g_raft_mode = std::getenv("KV_RAFT_ID") != nullptr || std::getenv("KV_RAFT_PEERS") != nullptr || std::getenv("KV_RAFT_DATA") != nullptr;
+
+    raft::RaftConfig raft_config;
+
+    if(g_raft_mode)
+    {
+        if(!raft::load_raft_config_from_env(raft_config,error))
         {
-            sync_mode = kv::StorageWorker::SyncMode::Always;
-            sync_mode_name = "always";
+            std::cerr << error << std::endl;
+            return 1;
         }
-        else if(m == "everysec")
+
+        if(client_port == raft_config.self.port)
         {
-            sync_mode = kv::StorageWorker::SyncMode::Everysec;
-            sync_mode_name = "everysec";
-        }
-        else if(m == "off")
-        {
-            sync_mode = kv::StorageWorker::SyncMode::Off;
-            sync_mode_name = "off";
-        }
-        else
-        {
-            std::cerr << "invalid KV_SYNC_MODE : " << m << " (expect always / everysec / off) " << std::endl;
+            std::cerr << "client port equals local raft port" << std::endl;
             return 1;
         }
     }
 
-    std::cout << "sync mode = " << sync_mode_name << std::endl;
+    //必须在线程创建前阻塞
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals,SIGINT);
+    sigaddset(&signals,SIGTERM);
 
-    //存储 worker 先于 Reactor 创建
-     kv::StorageWorker worker(db_path,1024,sync_mode);
+    const int signal_error = pthread_sigmask(SIG_BLOCK,&signals,nullptr);
 
-    if(!worker.ready())
+    if(signal_error != 0)
     {
-        std::cerr << "storage worker init failed : " << db_path << std::endl;
-        return 1;
-    }
-    g_worker = &worker;
-
-
-
-    //监听  IPV4 协议 TCP 拿取到文件描述符
-    int listenfd = socket(AF_INET,SOCK_STREAM,0);
-    if(listenfd < 0)
-    {
-        std::cerr << "socket failed : " << strerror(errno) << std::endl;
+        std::cerr << "pthread_sigmask : " << std::strerror(signal_error) << std::endl;
         return 1;
     }
 
-    if(!setnonblocking(listenfd))
+    //后台对象先于 Reactor 创建，销毁时 Reacotr 先释放连接
+    std::unique_ptr<kv::StorageWorker>storage_worker;
+    std::unique_ptr<raft::RaftWorker>raft_worker;
+
+    if(g_raft_mode)
     {
-        std::cerr << "setnonblocking failed : " << strerror(errno) << std::endl;
-        return 1;
+        raft_worker = std::make_unique<raft::RaftWorker>(raft_config);
+
+        if(!raft_worker->init(error) || !raft_worker->start(error))
+        {
+            std::cerr << "raft startup failed : " << error << std::endl;
+            return 1;
+        }
+
+        std::cout << "mode = raft " << std::endl;
+    }
+    else
+    {
+        const char* db_path = (argc > 1) ? argv[1] : "kvdb.data";
+        auto sync_mode  = kv::StorageWorker::SyncMode::Always;
+        const char* sync_mode_name = "always";
+
+        if(const char* p = std::getenv("KV_SYNC_MODE"))
+        {
+            const std::string mode = p;
+
+            if(mode == "always")
+            {
+                sync_mode = kv::StorageWorker::SyncMode::Always;
+            }
+            else if(mode == "everysec")
+            {
+                sync_mode = kv::StorageWorker::SyncMode::Everysec;
+                sync_mode_name = "everysec";
+            }
+            else if(mode == "off")
+            {
+                sync_mode = kv::StorageWorker::SyncMode::Off;
+                sync_mode_name = "off";
+            }
+            else
+            {
+                std::cerr << "invalid KV_SYNC_MODE : " << mode << "(expect always/everysec/off)" << std::endl;
+                return 1;
+            }
+
+        }
+
+        std::cout << "sync mode" << sync_mode_name << std::endl;
+
+        storage_worker = std::make_unique<kv::StorageWorker>(db_path,1024,sync_mode);
+
+        if(!storage_worker->ready())
+        {
+            std::cerr << "storage worker init failed : " << db_path << std::endl;
+            return 1;
+        }
+
+        g_worker = storage_worker.get();
+
     }
 
-    //具体设置 socket 选项 开启地址复用
-    int opt = 1;
-    if(setsockopt(listenfd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt)) < 0)
-    {
-        std::cerr << "setsockopt SO_REUSEADDR failed : " << strerror(errno) << std::endl;
-        return 1;
-    }
-
-    //指定内存空间前 n 个字节清零
-    struct sockaddr_in addr;
-    memset(&addr,0,sizeof(addr));
-
-    //设置套接字地址结构
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(9006);
-
-    if(bind(listenfd,(struct sockaddr*)&addr,sizeof(addr)) < 0)
-    {
-        std::cerr << "bind failed : " << strerror(errno) << std::endl;
-        return 1;
-    }
-
-
-    if(listen(listenfd,SOMAXCONN) < 0)
-    {
-        std::cerr << "listen failed : " << strerror(errno) << std::endl;
-        return 1;
-    }
-
-    g_idle_fd = open("/dev/null",O_RDONLY | O_CLOEXEC);//预留占位
-
-    if(g_idle_fd < 0)
-    {
-        std::cerr << "open /dev/null failed : " << strerror(errno) << std::endl;
-        return 1;
-    }
-
+    //先交给 Connection 持有 fd
 
     Reactor reactor;
 
     int frame_timeout_ms = 30000;
 
-    if(const char* p = getenv("KV_FRAME_TIMEOUT_MS"))
+    if(const char* p = std::getenv("KV_FRAME_TIMEOUT_MS"))
     {
-        frame_timeout_ms = atoi(p);
+        frame_timeout_ms = std::atoi(p);
     }
 
     reactor.set_frame_timeout_ms(frame_timeout_ms);
 
+    const int listenfd = socket(AF_INET,SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,0);
 
-    auto lc = std::make_unique<Connection>(listenfd,&reactor);
+    if(listenfd < 0)
+    {
+        std::cerr << "socket faliled" << std::endl;
 
-    lc->on_read = handle_accept;
-    lc->on_write = nullptr;
-    
-    if(!reactor.add_connection(listenfd,std::move(lc),CONN_BASE_EVENTS))
+        return 1;
+    }
+
+    auto listener = std::make_unique<Connection>(listenfd,&reactor);
+
+    int opt = 1;
+
+    if(setsockopt(listenfd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt)) < 0)
+    {
+        std::cerr << "setsockopt SO_REUSEADDR failed" << std::strerror(errno) << std::endl;
+        return 1;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(client_port);
+
+    if(bind(listenfd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr)) < 0)
+    {
+        std::cerr << "bind failed : " << std::strerror(errno) << std::endl;
+        return 1;
+    }
+
+    if(listen(listenfd,SOMAXCONN) < 0)
+    {
+        std::cerr << "listen failed : " << std::strerror(errno) << std::endl;
+        return 1;
+    }
+
+    listener->on_read = handle_accept;
+    listener->on_write = nullptr;
+
+    if(!reactor.add_connection(listenfd,std::move(listener),CONN_BASE_EVENTS))
     {
         std::cerr << "register listen fd failed,cannot serve" << std::endl;
         return 1;
     }
 
-    //将 worker 的 eventfd 复制进 epoll
-    int wake_fd = fcntl(worker.wakeup_fd(),F_DUPFD_CLOEXEC,0);//F_DUPFD_CLOEXEC 复制 + 自动 close-on-exec
-    if(wake_fd < 0)
+
+
+    if(storage_worker)
     {
-        std::cerr << "dup wakeup fd failed : " << strerror(errno) << std::endl;
+        const int wake_fd = fcntl(storage_worker->wakeup_fd(),F_DUPFD_CLOEXEC,0);
+
+        if(wake_fd < 0)
+        {
+            std::cerr << "dup wakeup fd failed : " << std::strerror(errno) << std::endl;
+            return 1;
+        }
+
+        auto wake_conn = std::make_unique<Connection>(wake_fd,&reactor);
+        wake_conn->on_read = handle_storage_events;
+        wake_conn->on_write = nullptr;
+
+        if(!reactor.add_connection(wake_fd,std::move(wake_conn),EPOLLIN))
+        {
+            std::cerr << "register wakeup fd failed,cannot reply" << std::endl;
+            return 1;
+        }
+    }
+
+    if(!install_control_events(reactor,signals,raft_worker.get(),raft_config.self_id,error))
+    {
+        std::cerr << error << std::endl;
         return 1;
     }
 
-    
-    auto wake_conn = std::make_unique<Connection>(wake_fd,&reactor);
-    wake_conn->on_read = handle_storage_events;
-    wake_conn->on_write = nullptr;
+    g_idle_fd = open("/dev/null",O_RDONLY | O_CLOEXEC);
 
-    //只关注 EPOLLIN
-    if(!reactor.add_connection(wake_fd,std::move(wake_conn),EPOLLIN))
+    if(g_idle_fd < 0)
     {
-        std::cerr << "register wakeup fd failed,cannot reply" << std::endl;
+        std::cerr << "open /dev/null failed : " << std::strerror(errno) << std::endl;
         return 1;
     }
 
-    bool ok = reactor.loop();
+    if(raft_worker)
+    {
+        const auto status = raft_worker->status();
+
+        if(!status.running)
+        {
+            std::cerr << "raft stpped before ready : " << status.error << std::endl;
+            ::close(g_idle_fd);
+            g_idle_fd = -1;
+            return 1;
+        }
+
+        std::cout << "READY id=" << raft_config.self_id << " pid=" << ::getpid() << std::endl;
+
+        print_raft_status(raft_config.self_id,status);
+    }
+
+    const bool ok = reactor.loop();
+
+    //主线程 join ，避免后台仍然运行时释放其要使用的对象
+    if(raft_worker)
+    {
+        raft_worker->stop();
+
+        const auto status = raft_worker->status();
+        if(!status.error.empty())
+        {
+            std::cerr << "raft shutdown : " << status.error << std::endl;
+            g_fatal = true;
+        }
+    }
+
+    ::close(g_idle_fd);
+    g_idle_fd = -1;
 
     return (ok && !g_fatal) ? 0 : 1;
 }

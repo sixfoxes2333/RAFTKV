@@ -67,14 +67,19 @@ class Node:
         self.seen_commit = 0
         self.last_row = None
 
+    def launch_spec(self):
+        """默认启动实际 Worker 驱动；kvserver 用同一观测器覆盖启动参数。"""
+        return [str(self.cluster.binary), str(self.id), self.cluster.peers, str(self.directory)], None
+
     def start(self):
         self.cluster.release_port(self.id)
         self.boot += 1
         self.log = self.cluster.artifacts / f"node{self.id}-boot{self.boot}.log"
         self.output = self.log.open("wb")
         self.started_ms = time.monotonic_ns() // 1_000_000
+        command, env = self.launch_spec()
         self.proc = subprocess.Popen(
-            [str(self.cluster.binary), str(self.id), self.cluster.peers, str(self.directory)],
+            command, env=env, cwd=self.directory,
             stdout=self.output, stderr=subprocess.STDOUT,
         )
         self.expected_alive = True
@@ -145,6 +150,7 @@ class Node:
 
 class Cluster:
     """预留三个互不重复的端口，启动节点时才释放对应监听端口。"""
+    node_class = Node
     def __init__(self, binary, work, artifacts):
         self.binary = binary
         self.work = work
@@ -159,7 +165,7 @@ class Cluster:
             self.reservations[node_id] = sock
             self.ports[node_id] = sock.getsockname()[1]
         self.peers = ",".join(f"{i}@127.0.0.1:{self.ports[i]}" for i in (1, 2, 3))
-        self.nodes = {i: Node(self, i) for i in (1, 2, 3)}
+        self.nodes = {i: self.node_class(self, i) for i in (1, 2, 3)}
 
     def release_port(self, node_id):
         sock = self.reservations.pop(node_id, None)
@@ -216,9 +222,9 @@ class Cluster:
         self.reservations.clear()
 
 
-def fresh_election_kill_restart(binary, work, artifacts):
+def fresh_election_kill_restart(binary, work, artifacts, cluster_type=Cluster):
     """全新三进程先稳定选主，心跳维持任期，再 kill -9 重选和原目录重启。"""
-    cluster = Cluster(binary, work, artifacts)
+    cluster = cluster_type(binary, work, artifacts)
     evidence = {}
     try:
         cluster.start()
@@ -255,9 +261,9 @@ def fresh_election_kill_restart(binary, work, artifacts):
         cluster.close()
 
 
-def old_log_catchup(binary, work, artifacts):
+def old_log_catchup(binary, work, artifacts, cluster_type=Cluster):
     """两个节点保存任期 1 的 130 条旧日志，空日志节点通过实际 Worker 追平。"""
-    cluster = Cluster(binary, work, artifacts)
+    cluster = cluster_type(binary, work, artifacts)
     try:
         expected = fixture_files(cluster.nodes[1].directory, 130)
         assert fixture_files(cluster.nodes[2].directory, 130) == expected

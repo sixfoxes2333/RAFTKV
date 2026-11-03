@@ -3,11 +3,10 @@
 一个从零手写的持久化键值存储服务：epoll 事件循环 + 后台存储线程 + 二进制协议 + Bitcask 风格日志存储。
 支持 `SET` / `GET` / `DEL`；默认 `always` 模式按批 `fsync` 后确认写入，另有 `everysec/off` 模式。
 
-> 当前状态：**单节点持久化 KV 已封版**（tag `storage-v1.2`）—— 单机存储 + 网络层 + 异步架构 +
-> 批提交（group commit）全部完成；10/28 M6五步完成（RPC 帧 / 四类正文 / 入站语义校验 / 配置解析 / 非阻塞 transport），完整普通回归 **41项通过**，配置的ASan/UBSan runner通过（不是全部41项都运行sanitizer，见§4）。本轮未重跑TSan。
-> Raft 已实现持久化基座、Core选举/复制/提交（M1–M4），并通过M5本轮确定性组合验收。
-> **真实transport/RaftWorker/已提交KV执行尚未接通**；测试进程中的Core对象投递，不是三进程集群验收。
-> M5新增真实存储与可控消息队列的12组场景，R4查询失败传播已由用户修复并通过红→绿；其他复审待办未自动关闭。下一步M6。
+> 当前状态：单节点 KV 已封版（`storage-v1.2`）；Raft 的持久化、Core 与非阻塞 transport 已接入生产 RaftWorker，**M7 运行层验收通过**。
+> 11/03 完整普通回归 **47/47**，配置的 ASan/UBSan runner 通过；CRC 冷启动并发与 Worker 9 组 TSan 通过，原 StorageWorker ×5/单机 E2E TSan 也通过。覆盖范围见 §4。
+> 三个实际 `kvserver` 已验证选主、SIGKILL leader 后重选、同目录重启加入及 130 条旧日志追平。RPC ID、同连接超时换编号、旧回复过滤与高任期退位已通过实际 Worker/TCP 测试。
+> **下一步 M8：已提交 KV 执行与一致恢复。当前 Raft 模式的 KV 请求统一返回 Error，applied=0；单机模式继续支持 SET/GET/DEL。** M9 故障封版与其他已知整改仍未完成，尚无 `raft-v1`。
 
 ```bash
 ./build/kvserver /tmp/db.data &          # 启动（默认 ./kvdb.data）
@@ -17,9 +16,19 @@
 kill -9 %1 && ./build/kvserver /tmp/db.data &   # 重启后数据仍在
 ```
 
+Raft 运行层的独立验收（脚本自行创建节点目录和互不重复的端口）：
+
+```bash
+python3 tests/raft_server_startup_test.py
+python3 tests/raft_server_cluster_test.py
+```
+
+手动运行需配置 `KV_PORT`、`KV_RAFT_ID`、`KV_RAFT_PEERS`、`KV_RAFT_DATA`。Raft 数据目录须已存在，PEERS 包含自己，Raft 监听端口从自身条目取得；不使用独立的 KV_RAFT_PORT。单机启动时不设置三个 KV_RAFT_* 变量。
 ---
 
 ## 1. 架构
+
+下图为单机 KV 路径。Raft 模式由独立 RaftWorker 拥有 Core/存储/transport，客户端 Reactor 通过加锁快照观察状态；KV 提案/apply 在 M8 接入。
 
 ```text
                     ┌───────────────────────── Reactor 线程 ─────────────────────────┐
@@ -50,6 +59,7 @@ kill -9 %1 && ./build/kvserver /tmp/db.data &   # 重启后数据仍在
 | net | `reactor.{h,cpp}` `connection.{h,cpp}` `protocol.{h,cpp}` | epoll 事件循环、连接生命周期、协议编解码 |
 | app | `storage_worker.{h,cpp}` | 后台存储线程 + eventfd 完成通知（Storage 的唯一访问者） |
 | tools | `client.cpp` | `kvclient` 命令行客户端 |
+| raft | `state` / `logstore` / `core` / `rpc_codec` / `rpc_validate` / `config` / `transport` / `worker` | Raft 持久化、协议状态、编解码与入站校验、非阻塞 TCP、后台事件驱动 |
 
 ---
 
@@ -281,10 +291,10 @@ cmake --build build -j && ./build/kvserver /tmp/kv_bench.data &
 ## 4. 测试与工具
 
 ```bash
-bash tests/run_all.sh            # 41 项普通回归
+bash tests/run_all.sh            # 47 项普通回归
 bash tests/run_all.sh --slow     # 追加：崩溃注入 + 故障注入 + 慢 fsync 注入
 bash tests/run_all.sh --asan     # 追加：ASan/UBSan（服务器 + 端到端场景）
-bash tests/run_asan.sh           # ASan/UBSan（存储单测 + 背压 + 端到端，检查 sanitizer 输出）
+bash tests/run_asan.sh           # 21 个测试目标 + Worker/kvserver 进程场景 + 单机网络场景
 bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 ./build/kvbench --help           # 压测客户端（见 3.1/3.2 的口径）
 ```
@@ -301,11 +311,15 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 
 10/28 M6第3步：`rpc_validate` 拦下语义自相矛盾的入站请求（term/ID 非 0、空日志 index0⇔term0、`prev+条数` 不溢出、`entry.term∈[1,request.term]` 且批次内非递减）。新增测试用真实存储证明：绕过校验时 term-4 条目确实被写入并回 success，随后用存储值重建 Core 时 `init` 拒绝启动；走校验则日志保持为空、Core 仍可用。修正一处把合法空日志投票判为非法（会让全新集群永远选不出 leader）的缩进错误。普通39/39、配置ASan/UBSan通过；仍未接入socket。
 
-10/28 M6第4步：`raft::parse_raft_config` 纯字符串解析 `KV_RAFT_ID`/`KV_RAFT_PEERS`/`KV_RAFT_DATA`（PEERS 列全部成员含自己，监听端口取自己那条），校验 ID/端口/`id@host:port` 语法/成员重复/自己缺失/地址冲突/空目录，失败不改出参；`load_raft_config_from_env` 只是读环境变量的薄层，缺变量报名字、不猜默认值。v1 只支持 IPv4。普通40/40、配置ASan/UBSan通过。
+10/28 M6第4步：`raft::parse_raft_config` 解析 `KV_RAFT_ID`/`KV_RAFT_PEERS`/`KV_RAFT_DATA`，PEERS 包含自己，监听端口取自身条目；ID/端口/成员关系/重复项/空目录等失败不改出参。host 仅检查基本语法，transport 当前使用 IPv4。环境加载器不猜缺省值。历史普通40/40、配置ASan/UBSan通过。
 
-10/28 测试脚手架修复：`net_backpressure`/`net_emfile`/`net_halfclose_flush` 三个测试启动服务器时没给数据库路径，会去扫工作目录里的 `kvdb.data`（现 853MB，ASan 下启动 30–34s），把 5 秒就绪探测拖死 —— 这正是 10/25 那次 ASan 背压失败的根因。三个测试改成各用 `/tmp` 私有空库并每轮先删除，ASan 门禁恢复稳定。
+10/28 测试夹具隔离：`net_backpressure`/`net_emfile`/`net_halfclose_flush` 改为各自指定 `/tmp` 数据文件，避免读取工作目录已有的大库。随后普通与配置 ASan 门禁通过。此前把 timeout 下的服务器总运行时长当作启动耗时、据此认定 10/25 失败根因，证据不足，撤回该根因结论；这些固定测试路径仍不支持并发复用。
 
 10/28 M6第5步：`RaftTransport` 非阻塞收发（真实 loopback）。新增 Hello 帧类型在连接建立时互报节点 ID；只有 ID 小的一方发起连接，避免双方同时连上互判重复；收包按 4 字节长度切帧，请求类在 transport 内解码+语义校验后才回调；`send` 对未连接 peer 直接返回失败，不排队。7 组测试：握手、四类帧字节一致、半帧不提前派发、一次写两帧、坏帧（4GiB 长度/首帧非 Hello/谎报自己 ID/非法条目任期）全部断连、peer_down 通知、4MiB 卡住的 peer 不影响另一条。普通41/41、配置ASan/UBSan通过。仍未接 Worker，不能选主。
+
+11/03 M7：RPC 业务帧增加 8B 编号（Hello 不变），Worker 持有原复制请求和截止时间；持久化成功后释放依赖消息。后台启动结果通过条件变量交给 main，运行快照加锁复制，signalfd/timerfd 接入客户端 Reactor，后台错误非零退出。真实进程验收覆盖就绪/PID/快照新鲜度、两种信号干净退出、预留 fd 失败退出、14 类坏配置先于存储拒绝、三节点选举/重选/重启/追平；Raft KV 入口保持 Error。CRC 首次并发建表的 TSan 数据竞争已实际红→绿。
+
+本轮 ASan/UBSan：21 个测试目标、Worker 三进程、kvserver 入口/三进程和原背压/单机 E2E；关闭 LSan，极小 RLIMIT_NOFILE 的预留 fd 用例仅普通运行。TSan：CRC 8 线程首次调用、Worker 9 组、原 StorageWorker ×5 与单机 kvserver E2E；不是全部普通测试均运行 TSan。
 
 | 文件 | 作用 |
 |---|---|
@@ -342,6 +356,11 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 | `tests/test_raft_rpc_validate.cpp` | M6第3步：投票/复制请求的语义规则表 + 真实存储证明（绕过校验会写入非法任期条目、重启被拒；走校验则日志不动） |
 | `tests/test_raft_config.cpp` | M6第4步：ID/端口/PEERS 语法/成员关系/环境变量缺失；失败不改出参与错误取名 |
 | `tests/test_raft_transport.cpp` | M6第5步：真实 loopback 的握手、四类帧、半包/粘包、坏帧断连、peer_down、慢 peer 隔离 |
+| `tests/test_crc32_threads.cpp` | 8 线程并发首次调用，无预热；独立 CRC 黄金值与 TSan 红→绿 |
+| `tests/test_raft_worker_init.cpp` / `test_raft_worker_live.cpp` | 启动恢复/目录锁 9 组，实际线程/TCP 9 组；含超时编号替换、迟到回复、高任期保存及失败停止 |
+| `tests/raft_worker_node.cpp` / `raft_worker_process_test.py` | 实际 Worker 子进程与共享 PID/新鲜状态/磁盘观察器 |
+| `tests/raft_server_startup_test.py` / `raft_server_cluster_test.py` | 真实 kvserver 启动/信号/坏配置/失败传播与三进程选主、重选、重启和追平 |
+| `tests/raft_cluster.py` | 旧 --smoke/--leader/--kill-leader CLI，复用新观察器；每次独立日志，不复用历史 leader 行 |
 | `tests/fail_inject.{c,py}` | LD_PRELOAD 故障注入（写/回滚/fsync/epoll_ctl/pwrite/pread 失败、短写、慢 fsync） |
 
 两个测试工程上的约定：
@@ -364,7 +383,7 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
    代价是打破"存储只被 worker 线程访问"这个不变量，需要分片 / RCU 之类的设计）。
    另外：C=8 × p=256 = 2048 条在途会超过 `max_pending` 1024，触发过载保护回 `Error` ——
    深管道要配合上限调整才有意义（见 §2.5）。
-5. **单点**：没有副本、没有故障转移（Raft 是下一步）。
+5. **KV 读写仍为单机服务**：Raft 选举/复制运行层已接通，提交后 KV 执行与一致恢复待 M8；Raft 模式暂时明确拒绝 KV 请求。
 6. **无认证/无 TLS**：仅适用于可信内网。
 7. **`MAX_MESSAGE` 16MB**：单条消息上限，超过则视为协议错误并关闭连接。
 8. **收包预算是"总量"而不是"公平分配"**：128MB 被半条帧吃满时，被关掉的是"正在长大的那条连接"，
@@ -372,7 +391,8 @@ bash tests/run_tsan.sh           # TSan：worker 单测 x5 + 服务器端到端
 9. **半条帧超时粒度 1s**：靠 `epoll_wait` 的 1s 周期扫描实现，所以 800ms 的超时会在大约 1s 内生效。
 10. **三种提交模式已实现**（`KV_SYNC_MODE=always|everysec|off`，默认 `always`）：
     `always` = 回复前这批必须落盘；`everysec` = 最多每秒落一次（契约"最多丢 1 秒"）；`off` = 只用于对照实验。
-    非法取值会**拒绝启动**（不许静默降级）。Raft 阶段：日志用 `always`，状态机用 `everysec`。
+    非法取值拒绝启动。该设置只控制单机模式；Raft HardState/日志的同步不受它影响，KV apply 策略在 M8 确定。
+11. **封版前资源整改仍未完成**：GET 完成结果与 Buffer 保留容量尚未被请求/未消费输入预算完整覆盖；Raft transport 的发送预算、连接/帧超时等仍有待办。
 
 ---
 
@@ -385,6 +405,7 @@ src/
   net/       reactor.{h,cpp} connection.{h,cpp} protocol.{h,cpp}
   app/       storage_worker.{h,cpp}
   tools/     client.cpp
+  raft/      state / logstore / core / rpc / codec / validate / config / transport / worker
   main.cpp
 tests/       （见上表）
 CMakeLists.txt
@@ -394,7 +415,7 @@ CMakeLists.txt
 
 1. ~~**group commit**~~ ✅ 已完成（`storage-v1.2`）：一次 fsync 提交一批，写入 170 → 10 281 ops/s
    （`always`）/ 98 210 ops/s（`everysec`），单条延迟不变（见 §2.10 / §3.1）。
-2. **Raft**：持久化基座、选举/复制/提交与M5本轮Core综合验收已过；下一步M6非阻塞transport（先完成RPC边界验证），再接RaftWorker、KV apply/一致恢复和真实三节点故障验收。
+2. **Raft**：M1–M7 主线已通过相应验收；下一步 M8 KV apply/一致恢复，再做 M9 真实读写故障验收及封版整改。
 3. 可靠性验证：网络分区/丢包/重排、客户端请求去重、线性一致性检查。
 4. 快照与日志压缩；ReadIndex / Lease Read 优化只读。
 5. 多 Reactor（提高读上限）与存储引擎接口化 + compaction，必要时对比 LSM 后端。
