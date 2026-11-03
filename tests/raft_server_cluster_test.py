@@ -40,11 +40,15 @@ class ServerNode(worker.Node):
             with socket.create_connection(
                     ("127.0.0.1", self.cluster.client_ports[self.id]), timeout=2) as sock:
                 for op, value in ((1, b"not-a-local-write"), (2, b"")):
-                    name = b"m7-cluster"
+                    name = b"m8-cluster"
                     body = struct.pack(">BII", op, len(name), len(value)) + name + value
                     sock.sendall(struct.pack(">I", len(body)) + body)
                     length, = struct.unpack(">I", receive(sock, 4))
-                    assert length == 5 and receive(sock, length) == b"\x02\x00\x00\x00\x00"
+                    #M8 起 KV 请求由 Raft 服务：成功时 GET 会带回 value
+                    payload = receive(sock, length)
+                    status, vlen = struct.unpack(">BI", payload[:5])
+                    assert status in (0, 1, 2), status
+                    assert vlen == len(payload) - 5, (vlen, length)
             assert not (self.directory / "must-not-open.data").exists()
             assert not (self.directory / "kvdb.data").exists()
             self.checked.add(key)

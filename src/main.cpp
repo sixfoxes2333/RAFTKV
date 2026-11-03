@@ -23,6 +23,7 @@ int g_idle_fd = -1;//预留占位 fd
 
 bool g_fatal = false; //全局致命标志
 
+raft::RaftWorker *g_raft = nullptr; //Raft 模式的后台线程入口
 kv::StorageWorker *g_worker = nullptr; //后台存储线程 Reactor 投递任务
 
 bool g_raft_mode = false; //启动时确定，运行期间不切换
@@ -152,7 +153,51 @@ void handle_message(Connection *c , const char *payload , size_t len)
 {
     if(g_raft_mode)
     {
-        send_error(c);
+        //Raft 模式：请求先排队，由后台提出日志；结果经 eventfd 回来
+        kv::Request parsed;
+
+        if(!kv::parse_request(payload,len,parsed))
+        {
+            //解析失败当场回；若还有在途请求，顺序会被打乱，直接断开
+            send_error(c);
+
+            if(c->pending_requests() > 0)
+            {
+                c->reactor()->request_close(c);
+            }
+
+            return;
+        }
+
+        raft::RaftWorker::ClientRequest task;
+        task.fd = c->fd();
+        task.connection_id = c->connection_id();
+        task.sequence = ++g_next_sequence;
+        task.bytes = parsed.key.size() + parsed.value.size();
+        task.request = std::move(parsed);
+
+        if(c->inflight_bytes() + task.bytes > kv::MAX_CONN_QUEUE_BYTES)
+        {
+            send_error(c);
+            c->reactor()->request_close(c);
+            return;
+        }
+
+        if(!g_raft->submit_client(std::move(task)))
+        {
+            if(c->pending_requests() > 0)
+            {
+                send_error(c);
+                c->reactor()->request_close(c);
+                return;
+            }
+
+            send_error(c);
+            return;
+        }
+
+        c->add_pending_request();
+        c->add_inflight_bytes(len);
         return;
     }
 
@@ -445,6 +490,43 @@ void handle_storage_events(Connection* w)
     }
 
 }
+//Raft 后台有结果：按连接身份和序号顺序回包
+void handle_raft_events(Connection* w)
+{
+    auto done = g_raft->take_client_results();
+
+    for(auto& item : done)
+    {
+        Connection* c = w->reactor()->find_connection(item.fd,item.connection_id);
+
+        if(c == nullptr)
+        {
+            continue;
+        }
+
+        //先后退在途计数，再回包；顺序由后台按日志顺序产生
+        c->finish_pending_request();
+        c->release_inflight_bytes(item.bytes);
+
+        if(c->closing())
+        {
+            continue;
+        }
+
+        send_response(c,item.response);
+    }
+
+    //后台已经退出：整个服务器不能继续假装可用
+    const auto status = g_raft->status();
+
+    if(!status.running)
+    {
+        std::cerr << "raft worker unavailable : " << status.error << std::endl;
+        g_fatal = true;
+        w->reactor()->stop();
+    }
+}
+
 
 //main 启动时读取客户端端口，未配置则沿用 9006
 bool load_client_port(std::uint16_t& out,std::string& error)
@@ -491,10 +573,11 @@ void print_raft_status(std::uint64_t id,const raft::RaftWorker::Status& status)
                 << " term=" << status.term
                 << " commit=" << status.commit
                 << " last=" << status.last
-                << " applied=0"
+                << " applied=" << status.applied
                 << " pid=" << ::getpid()
                 << " running=" << (status.running ? 1 : 0)
                 << " updated_ms=" << status.updated_ms
+                << " serving=" << (status.serving ? 1 : 0)
                 << std::endl;
 }
 
@@ -680,6 +763,8 @@ int main(int argc,char* argv[])
         }
 
         std::cout << "mode = raft " << std::endl;
+
+        g_raft = raft_worker.get();
     }
     else
     {
@@ -744,7 +829,7 @@ int main(int argc,char* argv[])
 
     if(listenfd < 0)
     {
-        std::cerr << "socket faliled" << std::endl;
+        std::cerr << "socket failed" << std::endl;
 
         return 1;
     }
@@ -785,6 +870,29 @@ int main(int argc,char* argv[])
         return 1;
     }
 
+
+    //Raft 模式的完成通知：后台把结果经 eventfd 交给这个 Reactor
+    if(raft_worker)
+    {
+        const int fd = fcntl(raft_worker->wakeup_fd(),F_DUPFD_CLOEXEC,0);
+
+        if(fd < 0)
+        {
+            std::cerr << "dup raft wakeup fd failed : "
+                      << std::strerror(errno) << std::endl;
+            return 1;
+        }
+
+        auto raft_conn = std::make_unique<Connection>(fd,&reactor);
+        raft_conn->on_read = handle_raft_events;
+        raft_conn->on_write = nullptr;
+
+        if(!reactor.add_connection(fd,std::move(raft_conn),EPOLLIN))
+        {
+            std::cerr << "register raft wakeup fd failed" << std::endl;
+            return 1;
+        }
+    }
 
 
     if(storage_worker)

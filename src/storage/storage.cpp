@@ -7,6 +7,7 @@
 #include<cerrno>
 #include<iostream>
 #include<vector>
+#include <sys/stat.h>
 
 static const char MAGIC[4] = {'K','V','D','B'}; //magic
 static const uint32_t FORMAT_VERSION = 2; //版本号
@@ -181,14 +182,36 @@ namespace kv
 
 
     
-    Storage::Storage(const std::string &path)
-    {
-        fd_ = open(path.c_str(),O_RDWR | O_CREAT,0644);
+    Storage::Storage(const std::string &path,OpenMode mode)
+    {   
+        int flags = O_RDWR | O_CREAT | O_CLOEXEC;
+
+        if(mode == OpenMode::Rebuild)
+        {
+            flags |= O_NOFOLLOW | O_NONBLOCK;
+        }
+
+        fd_ = open(path.c_str(),flags,mode == OpenMode::Rebuild ? 0600 : 0644);
 
         if(fd_ < 0)
         {
             std::cerr << "open " << path << " failed: " << strerror(errno) << std::endl;
             return; //未打开成功 fd_ 仍等于 -1 good() == false
+        }
+
+        if(mode == OpenMode::Rebuild)
+        {
+            struct stat info{};
+            const int result = fstat(fd_,&info);
+
+            if(result < 0 || !S_ISREG(info.st_mode) || info.st_nlink != 1) 
+            {
+                const int code = errno;
+                std::cerr << "rebuild target check failed : " << path << " : " << (result < 0 ? strerror(code) : "expected a regular file with one link") << std::endl;
+                close(fd_);
+                fd_ = -1;
+                return;
+            }
         }
 
         //文件独占锁
@@ -198,6 +221,18 @@ namespace kv
             close(fd_);
             fd_ = -1;
             return;
+        }
+
+        //仅重建派生库
+        if(mode == OpenMode::Rebuild)
+        {
+            if(ftruncate(fd_,0) != 0)
+            {
+                std::cerr << "rebuild truncate failed : " << strerror(errno) << std::endl;
+                close(fd_);
+                fd_ = -1;
+                return;
+            }
         }
 
         //lseek 获取文件大小

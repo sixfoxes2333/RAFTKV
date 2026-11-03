@@ -72,6 +72,12 @@ echo "[ASan] 运行存储恢复测试"
 run_bin test_recovery
 echo "[ASan] 运行 CRC 首次调用并发回归"
 run_bin test_crc32_threads
+echo "[ASan] 运行 Raft 日志命令编解码测试"
+run_bin test_raft_command
+echo "[ASan] 运行派生 KV 重建测试"
+run_bin test_storage_rebuild
+echo "[ASan] 运行 Raft 状态机测试"
+run_bin test_raft_state_machine
 echo "[ASan] 运行类型契约测试（编译期断言，顺带确认可执行）"
 run_bin test_noncopyable
 
@@ -121,7 +127,7 @@ else
 fi
 
 echo "[ASan] 运行实际 kvserver 的 M7 入口与三进程验收"
-for script in raft_server_startup_test.py raft_server_cluster_test.py; do
+for script in raft_server_startup_test.py raft_server_cluster_test.py raft_kv_e2e_test.py; do
     extra=()
     if [ "$script" = raft_server_startup_test.py ]; then
         extra+=(--skip-idle-fd)

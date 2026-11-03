@@ -2,6 +2,7 @@
 #include "raft/rpc_codec.h"
 #include "raft/apply.h"
 #include "raft/rpc_validate.h"
+#include "raft/command.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -9,21 +10,53 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/eventfd.h>
 #include <utility>
+#include <iostream>
 #include <exception>
 
 namespace raft
 {
 
 //构造时保存路径，使日志视图指向本节点的 logstore
-RaftWorker::RaftWorker(const RaftConfig& config):config_(config),state_(config_.data_dir),log_(config_.data_dir),log_view_(log_)
+RaftWorker::RaftWorker(const RaftConfig& config):config_(config),state_(config_.data_dir),log_(config_.data_dir),log_view_(log_),machine_(config_.data_dir)
 {
 
+}
+
+//写 eventfd 唤醒客户端 Reactor；计数器已满说明通知已经生效
+void RaftWorker::notify_reactor()
+{
+    if(wakeup_fd_ < 0)
+    {
+        return;
+    }
+
+    const std::uint64_t one = 1;
+    ssize_t n;
+
+    do
+    {
+        n = ::write(wakeup_fd_,&one,sizeof(one));
+    }
+    while(n < 0 && errno == EINTR);
+
+    if(n == static_cast<ssize_t>(sizeof(one)) || (n < 0 && errno == EAGAIN))
+    {
+        return;
+    }
+
+    std::cerr << "raft worker : eventfd write failed" << std::endl;
 }
 
 RaftWorker::~RaftWorker()
 {
     stop();
+    if(wakeup_fd_ >= 0)
+    {
+        ::close(wakeup_fd_);
+        wakeup_fd_ = -1;
+    }
     if(dir_fd_ >= 0)
     {
         ::close(dir_fd_);
@@ -34,6 +67,19 @@ RaftWorker::~RaftWorker()
 bool RaftWorker::init(std::string& error)
 {
     error.clear();
+
+    //这个 fd 跟着 worker 整个生命周期
+    if(wakeup_fd_ < 0)
+    {
+        wakeup_fd_ = ::eventfd(0,EFD_NONBLOCK | EFD_CLOEXEC);
+
+        if(wakeup_fd_ < 0)
+        {
+            error = std::string("raft worker : create eventfd : ")
+                    + std::strerror(errno);
+            return false;
+        }
+    }
 
     if(init_attempted_)
     {
@@ -165,6 +211,12 @@ bool RaftWorker::init(std::string& error)
 
     reset_election_timer();
     publish_status(false,"");
+    //Raft 文件恢复完成后再重建派生 KV，lastApplied 从 0 开始
+    if(!machine_.init(error))
+    {
+        return false;
+    }
+
     return true;
 }
 
@@ -638,6 +690,8 @@ void RaftWorker::publish_status(bool running,const std::string& error)
     next.term = core_.hard_state().current_term;
     next.commit = committed_index_;
     next.last = log_.last_index();
+    next.applied = machine_.applied();
+    next.serving = barrier_ready_;
     next.updated_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count());
     next.error = error;
 
@@ -764,6 +818,19 @@ void RaftWorker::worker_loop()
 
                 const auto now = Clock::now();
 
+                //先把排队请求变成日志，再推进已提交命令的执行
+                if(!pump_clients(error))
+                {
+                    runtime_error_ = std::move(error);
+                    break;
+                }
+
+                if(!pump_apply(error))
+                {
+                    runtime_error_ = std::move(error);
+                    break;
+                }
+
                 if(core_.role() == Role::Leader)
                 {
                     if(now >= heartbeat_deadline_)
@@ -810,8 +877,13 @@ void RaftWorker::worker_loop()
         runtime_error_ = "raft worker : unknown runtime exception";
     }
     
+    //停止时不能留下永远等不到回复的客户端
+    abort_waiting();
+    machine_.stop();
+
     if(transport_)
     {
+
         transport_->stop();
         transport_.reset();
     }
@@ -840,5 +912,350 @@ void RaftWorker::stop()
 }
 
 
+
+//Reactor 线程调用：只入队并通知，不在 Reactor 里等 Raft
+bool RaftWorker::submit_client(ClientRequest request)
+{
+    if(request.fd < 0 || request.bytes > MAX_CLIENT_BYTES)
+    {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+
+        if(stop_requested_.load() || !core_.good())
+        {
+            return false;
+        }
+
+        //请求和结果共用一份预算，避免慢连接把内存拖爆
+        if(client_in_bytes_ + client_out_bytes_ + request.bytes > MAX_CLIENT_BYTES)
+        {
+            return false;
+        }
+
+        client_in_bytes_ += request.bytes;
+        client_inbox_.push_back(std::move(request));
+    }
+
+    notify_reactor();
+    return true;
+}
+
+//Reactor 线程调用：一次取走所有已完成的结果
+std::vector<RaftWorker::ClientResult> RaftWorker::take_client_results()
+{
+    std::vector<ClientResult> out;
+    std::lock_guard<std::mutex> lock(client_mutex_);
+
+    out.swap(client_outbox_);
+    client_out_bytes_ = 0;
+    return out;
+}
+
+//调用方必须持有 client_mutex_；预算在入队时已经算过
+void RaftWorker::answer_locked(ClientResult result)
+{
+    client_out_bytes_ += result.bytes;
+    client_outbox_.push_back(std::move(result));
+}
+
+//退位、换届或停止：等待中的请求全部按失败回答，不能永久悬挂
+void RaftWorker::abort_waiting()
+{
+    if(waiting_.empty())
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+
+        for(const auto& item : waiting_)
+        {
+            ClientResult out;
+            out.fd = item.second.fd;
+            out.connection_id = item.second.connection_id;
+            out.sequence = item.second.sequence;
+            out.bytes = item.second.bytes;
+            out.response.status = kv::Status::Error;
+
+            client_in_bytes_ -= item.second.bytes;
+            answer_locked(std::move(out));
+        }
+    }
+
+    waiting_.clear();
+    notify_reactor();
+}
+
+//非 leader：排队中的请求立即拒绝，客户端不会一直等
+void RaftWorker::reject_inbox()
+{
+    std::deque<ClientRequest> incoming;
+
+    {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        incoming.swap(client_inbox_);
+    }
+
+    if(incoming.empty())
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+
+        for(const auto& item : incoming)
+        {
+            ClientResult out;
+            out.fd = item.fd;
+            out.connection_id = item.connection_id;
+            out.sequence = item.sequence;
+            out.bytes = item.bytes;
+            out.response.status = kv::Status::Error;
+
+            client_in_bytes_ -= item.bytes;
+            answer_locked(std::move(out));
+        }
+    }
+
+    notify_reactor();
+}
+
+//领导权变化、屏障和提案都在这里决定；返回 false 表示必须停止
+bool RaftWorker::pump_clients(std::string& error)
+{
+    error.clear();
+
+    const bool leader = (core_.role() == Role::Leader);
+    const std::uint64_t term = core_.hard_state().current_term;
+
+    //换届或退位：旧的等待上下文已经不可能由本次 leader 完成
+    if(!leader || term != leader_term_)
+    {
+        abort_waiting();
+        barrier_ready_ = false;
+        barrier_index_ = 0;
+        leader_term_ = leader ? term : 0;
+    }
+
+    if(!leader)
+    {
+        reject_inbox();
+        return true;
+    }
+
+    //新 leader 先提本任期 no-op，提交并执行完才放行客户端
+    if(!barrier_ready_)
+    {
+        if(barrier_index_ == 0)
+        {
+            std::uint64_t index = 0;
+
+            if(!propose_command(make_noop_command(),index,error))
+            {
+                return false;
+            }
+
+            barrier_index_ = index;
+        }
+
+        if(machine_.applied() >= barrier_index_)
+        {
+            barrier_ready_ = true;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    //一次最多提案 32 条，避免长时间不处理网络
+    for(int round = 0; round < 32; ++round)
+    {
+        ClientRequest request;
+
+        {
+            std::lock_guard<std::mutex> lock(client_mutex_);
+
+            if(client_inbox_.empty())
+            {
+                break;
+            }
+
+            request = std::move(client_inbox_.front());
+            client_inbox_.pop_front();
+        }
+
+        std::string command;
+
+        if(!encode_kv_command(request.request,command,error))
+        {
+            //坏命令只影响这一条，不影响节点
+            std::lock_guard<std::mutex> lock(client_mutex_);
+            ClientResult out;
+            out.fd = request.fd;
+            out.connection_id = request.connection_id;
+            out.sequence = request.sequence;
+            out.bytes = request.bytes;
+            out.response.status = kv::Status::Error;
+
+            client_in_bytes_ -= request.bytes;
+            answer_locked(std::move(out));
+            notify_reactor();
+            continue;
+        }
+
+        std::uint64_t index = 0;
+
+        if(!propose_command(command,index,error))
+        {
+            return false;
+        }
+
+        waiting_[index] = Waiter{request.fd,request.connection_id,
+                                 request.sequence,term,request.bytes};
+    }
+
+    return true;
+}
+
+//构造并保存一条本条目的日志；返回它的序号
+bool RaftWorker::propose_command(const std::string& command,std::uint64_t& index,std::string& error)
+{
+    error.clear();
+
+    LogEntry entry;
+
+    if(!core_.build_proposal(command,entry,error))
+    {
+        return false;
+    }
+
+    //先落盘，成功后才让 Core 认为日志已经存在
+    if(!log_.append(entry,error))
+    {
+        return false;
+    }
+
+    if(!core_.on_log_persisted(error))
+    {
+        core_.stop();
+        return false;
+    }
+
+    CommitOut committed;
+
+    if(!core_.advance_commit(committed,error))
+    {
+        return false;
+    }
+
+    if(committed.committed_to > committed_index_)
+    {
+        committed_index_ = committed.committed_to;
+    }
+
+    //尽快把新日志复制出去
+    heartbeat_deadline_ = Clock::now();
+    index = entry.index;
+    return true;
+}
+
+//按顺序把已提交日志交给 KV，并把结果交回客户端
+bool RaftWorker::pump_apply(std::string& error)
+{
+    error.clear();
+
+    if(!machine_.good())
+    {
+        error = "raft worker : state machine unavailable";
+        return false;
+    }
+
+    //先收上一条的执行结果
+    bool done = false;
+    ApplyResult result;
+
+    if(!machine_.poll(done,result,error))
+    {
+        return false;
+    }
+
+    if(done)
+    {
+        publish_applied(result);
+    }
+
+    //空闲就继续提交下一条，缺口由 StateMachine 自己拒绝
+    while(!machine_.busy() && machine_.applied() < committed_index_)
+    {
+        const std::uint64_t index = machine_.applied() + 1;
+        LogEntry entry;
+
+        if(!log_.get(index,entry,error))
+        {
+            return false;
+        }
+
+        if(!machine_.submit(index,entry.term,entry.command,done,result,error))
+        {
+            return false;
+        }
+
+        if(done)
+        {
+            publish_applied(result);
+        }
+    }
+
+    return true;
+}
+
+//把一条执行结果交回对应的客户端；noop 和已断开连接没有结果
+void RaftWorker::publish_applied(const ApplyResult& result)
+{
+    if(result.noop)
+    {
+        return;
+    }
+
+    const auto it = waiting_.find(result.index);
+
+    if(it == waiting_.end())
+    {
+        return;
+    }
+
+    const Waiter waiter = it->second;
+    waiting_.erase(it);
+
+    ClientResult out;
+    out.fd = waiter.fd;
+    out.connection_id = waiter.connection_id;
+    out.sequence = waiter.sequence;
+    out.bytes = waiter.bytes;
+
+    //任期对不上说明这条日志已被新 leader 覆盖，不能当作成功
+    if(result.term != waiter.term)
+    {
+        out.response.status = kv::Status::Error;
+    }
+    else
+    {
+        out.response = result.response;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(client_mutex_);
+        client_in_bytes_ -= waiter.bytes;
+        answer_locked(std::move(out));
+    }
+
+    notify_reactor();
+}
 
 }//namespace raft

@@ -45,7 +45,12 @@ target_sources(kvserver PRIVATE
     src/raft/logstore.cpp
     src/raft/transport.cpp
     src/raft/rpc_codec.cpp
-    src/raft/rpc_validate.cpp)
+    src/raft/rpc_validate.cpp
+    src/raft/command.cpp
+    src/raft/state_machine.cpp
+    src/app/storage_worker.cpp
+    src/storage/storage.cpp
+    src/net/protocol.cpp)
 
 add_executable(kvclient
 src/tools/client.cpp
@@ -227,6 +232,11 @@ add_executable(test_raft_worker_init
     src/raft/transport.cpp
     src/raft/rpc_codec.cpp
     src/raft/rpc_validate.cpp
+    src/raft/command.cpp
+    src/raft/state_machine.cpp
+    src/app/storage_worker.cpp
+    src/storage/storage.cpp
+    src/net/protocol.cpp
     src/storage/record.cpp)
 target_include_directories(test_raft_worker_init PRIVATE src)
 target_link_libraries(test_raft_worker_init PRIVATE Threads::Threads)
@@ -253,6 +263,11 @@ set(RAFT_WORKER_TEST_SRC
     src/raft/transport.cpp
     src/raft/rpc_codec.cpp
     src/raft/rpc_validate.cpp
+    src/raft/command.cpp
+    src/raft/state_machine.cpp
+    src/app/storage_worker.cpp
+    src/storage/storage.cpp
+    src/net/protocol.cpp
     src/storage/record.cpp)
 add_executable(test_raft_worker_live
     tests/test_raft_worker_live.cpp ${RAFT_WORKER_TEST_SRC})
@@ -269,3 +284,25 @@ add_executable(test_crc32_threads
     tests/test_crc32_threads.cpp src/storage/record.cpp)
 target_include_directories(test_crc32_threads PRIVATE src)
 target_link_libraries(test_crc32_threads PRIVATE Threads::Threads)
+
+# M8：日志命令编解码（复用客户端 payload，内部 Noop 单字节0）
+add_executable(test_raft_command
+    tests/test_raft_command.cpp src/raft/command.cpp src/net/protocol.cpp)
+target_include_directories(test_raft_command PRIVATE src)
+
+# M8：派生 KV 的 Rebuild 打开方式；默认 Recover 保持不变
+add_executable(test_storage_rebuild
+    tests/test_storage_rebuild.cpp
+    src/storage/storage.cpp src/storage/record.cpp
+    src/app/storage_worker.cpp src/net/protocol.cpp)
+target_include_directories(test_storage_rebuild PRIVATE src)
+target_link_libraries(test_storage_rebuild PRIVATE Threads::Threads)
+
+# M8：状态机只执行连续已提交命令，完成 KV 后推进 lastApplied
+add_executable(test_raft_state_machine
+    tests/test_raft_state_machine.cpp
+    src/raft/state_machine.cpp src/raft/command.cpp
+    src/storage/storage.cpp src/storage/record.cpp
+    src/app/storage_worker.cpp src/net/protocol.cpp)
+target_include_directories(test_raft_state_machine PRIVATE src)
+target_link_libraries(test_raft_state_machine PRIVATE Threads::Threads)

@@ -25,7 +25,14 @@ namespace kv
     {
     public:
 
-        explicit Storage(const std::string &path); //禁用隐式转换，打开/新建文件，顺便写上 recover() 以重建 index_
+    enum class OpenMode
+    {
+        Recover, //打开并恢复已有数据库
+        Rebuild //清空重建
+    };
+
+
+        explicit Storage(const std::string &path,OpenMode mode = OpenMode::Recover); //禁用隐式转换，打开/新建文件，顺便写上 recover() 以重建 index_
         ~Storage();
 
 

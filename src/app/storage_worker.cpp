@@ -10,7 +10,7 @@
 namespace kv
 {
 
-    StorageWorker::StorageWorker(const std::string &path,size_t max_pending,SyncMode mode):storage_(path),max_pending_(max_pending),mode_(mode)
+    StorageWorker::StorageWorker(const std::string &path,size_t max_pending,SyncMode mode,Storage::OpenMode open_mode):storage_(path,open_mode),max_pending_(max_pending),mode_(mode)
     {
         //打开文件并 recover()
         //失败则 good() 为 false

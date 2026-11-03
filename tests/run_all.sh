@@ -71,6 +71,30 @@ else
 fi
 
 echo
+echo "== $((++STEP)) Raft 日志命令（Noop/KV黄金字节、截断、16MiB总量）=="
+if timeout 60 ./build/test_raft_command; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) 派生 KV 重建（Rebuild/加锁前不截断/链接与硬链接拒绝）=="
+if timeout 60 ./build/test_storage_rebuild; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft 状态机（只执行连续已提交命令、noop 推进位置）=="
+if timeout 90 ./build/test_raft_state_machine; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
 echo "== $((++STEP)) 半关闭回归（小消息）=="
 if python3 tests/net_halfclose_test.py; then
     :
@@ -410,6 +434,14 @@ fi
 echo
 echo "== $((++STEP)) kvserver 三进程（选主/重选/重启/追平与KV入口门控）=="
 if timeout 90 python3 tests/raft_server_cluster_test.py; then
+    :
+else
+    fail=$((fail + 1))
+fi
+
+echo
+echo "== $((++STEP)) Raft KV 端到端（三进程 SET/GET/DEL、杀leader、重启重放）=="
+if timeout 180 python3 tests/raft_kv_e2e_test.py; then
     :
 else
     fail=$((fail + 1))

@@ -55,7 +55,7 @@ namespace kv
 
 
         //path 数据库文件 max_pending 队列上限
-        explicit StorageWorker(const std::string & path,size_t max_pending = 1024,SyncMode mode = SyncMode::Always);
+        explicit StorageWorker(const std::string& path,size_t max_pending = 1024,SyncMode mode = SyncMode::Always,Storage::OpenMode open_mode = Storage::OpenMode::Recover);
         ~StorageWorker();
 
         //不可复制或移动

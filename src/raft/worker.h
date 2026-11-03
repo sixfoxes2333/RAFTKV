@@ -7,14 +7,20 @@
 #include "raft/logstore.h"
 #include "raft/logview.h"
 #include "raft/transport.h"
+#include "net/protocol.h"
+#include "raft/state_machine.h"
 #include <chrono>
 #include <random>
 #include <memory>
 #include <map>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <mutex>
 #include <thread>
+#include <deque>
+#include <vector>
+
 
 namespace raft
 {
@@ -44,6 +50,8 @@ struct Status
     std::uint64_t term = 0;
     std::uint64_t commit = 0;
     std::uint64_t last = 0;
+    std::uint64_t applied = 0; //KV 已经执行到哪里
+    bool serving = false; //本任期屏障是否已完成，可以服务客户端
     std::uint64_t updated_ms = 0; //后台采样时间
     std::string error;
 };
@@ -56,6 +64,38 @@ void stop();
 
 //返回加锁复制的快照，主线程不直接访问 core
 Status status() const;
+
+    //Reactor 线程投递的一条客户端请求
+    struct ClientRequest
+    {
+        int fd = -1;
+        std::uint64_t connection_id = 0;
+        std::uint64_t sequence = 0;
+        kv::Request request;
+        std::size_t bytes = 0;
+    };
+
+    //后台执行完成后交回 Reactor 的结果
+    struct ClientResult
+    {
+        int fd = -1;
+        std::uint64_t connection_id = 0;
+        std::uint64_t sequence = 0;
+        kv::Response response;
+        std::size_t bytes = 0;
+    };
+
+    //Reactor 线程调用：只排队
+    bool submit_client(ClientRequest request);
+
+    //Reactor 线程调用：搬走当前所有结果
+    std::vector<ClientResult> take_client_results();
+
+    //把这个 eventfd 注册进客户端 Reactor
+    int wakeup_fd() const
+    {
+        return wakeup_fd_;
+    }
 
 
 private:
@@ -135,6 +175,41 @@ private:
     Status status_;
     std::string runtime_error_; //仅后台读写，通过快照交给主线程
 
+    static constexpr std::size_t MAX_CLIENT_BYTES = 16 * 1024 * 1024;
+
+    int wakeup_fd_ = -1; //通知 Reactor 有结果可取
+
+    mutable std::mutex client_mutex_;
+    std::deque<ClientRequest> client_inbox_; //Reactor 写，后台取
+    std::vector<ClientResult> client_outbox_; //后台写，Reactor 取
+    std::size_t client_in_bytes_ = 0;
+    std::size_t client_out_bytes_ = 0;
+
+    StateMachine machine_; //派生 KV 与 lastApplied
+
+    //等待执行的客户端请求，按日志序号索引
+    struct Waiter
+    {
+        int fd = -1;
+        std::uint64_t connection_id = 0;
+        std::uint64_t sequence = 0;
+        std::uint64_t term = 0;
+        std::size_t bytes = 0;
+    };
+    std::map<std::uint64_t,Waiter> waiting_;
+
+    std::uint64_t barrier_index_ = 0; //本任期 no-op 的日志序号
+    std::uint64_t leader_term_ = 0; //当前服务客户端的 leader 任期
+    bool barrier_ready_ = false; //屏障已提交且已执行
+
+    void notify_reactor();
+    bool pump_clients(std::string& error); //取请求，处理领导权与屏障
+    bool pump_apply(std::string& error); //提交已完成日志给 KV
+    bool propose_command(const std::string& command,std::uint64_t& index,std::string& error);
+    void publish_applied(const ApplyResult& result); //把执行结果交给客户端
+    void answer_locked(ClientResult result); //调用方必须持有 client_mutex_
+    void abort_waiting(); //退位或停止时统一回 Error
+    void reject_inbox(); //非 leader 时拒绝排队中的请求
 };
 
 }//namespace raft

@@ -34,7 +34,11 @@ def fixture_files(directory, count):
     state = head + struct.pack(">I", zlib.crc32(head) & 0xffffffff)
     log = bytearray()
     for index in range(1, count + 1):
-        command = b"fixture:" + struct.pack(">I", index) + b"\x00\xff"
+        #必须是合法的 KV 命令（SET op=1 + key_len + val_len + key + value），
+        #否则提交后 apply 会按设计停机。
+        key = b"fixture:%d" % index
+        value = b"\x00\xff"
+        command = bytes([1]) + struct.pack(">II", len(key), len(value)) + key + value
         header = struct.pack(">4sIQQI", b"RLOG", 1, index, 1, len(command))
         log += header + struct.pack(">I", zlib.crc32(header) & 0xffffffff)
         log += command + struct.pack(">I", zlib.crc32(command) & 0xffffffff)
@@ -101,6 +105,8 @@ class Node:
             return None
         row = None
         required = {"id", "pid", "role", "term", "commit", "last", "running", "updated_ms"}
+        #kvserver 额外输出 applied/serving；Worker 驱动不输出，按可选处理
+        optional = {"applied", "serving"}
         for line in text.splitlines():
             if not line.startswith("RAFTSTATUS "):
                 continue
@@ -109,7 +115,8 @@ class Node:
                 if not required <= fields.keys():
                     continue
                 candidate = {key: (value if key == "role" else int(value))
-                             for key, value in fields.items() if key in required}
+                             for key, value in fields.items()
+                             if key in required or key in optional}
             except (ValueError, TypeError):
                 continue
             if candidate["id"] == self.id and candidate["pid"] == self.proc.pid:
@@ -228,7 +235,9 @@ def fresh_election_kill_restart(binary, work, artifacts, cluster_type=Cluster):
     evidence = {}
     try:
         cluster.start()
-        leader, rows = cluster.stable_leader(last=0)
+        #新 leader 会先提交并执行本任期 no-op，所以 last 至少是 1
+        leader, rows = cluster.stable_leader()
+        assert all(r["commit"] == r["last"] for r in rows), rows
         evidence["first"] = dict(leader=leader, rows=rows, states=cluster.votes(leader))
         until = time.monotonic() + 2.4  # 超过当前最大选举超时；期间持续检查状态。
         while time.monotonic() < until:
@@ -243,14 +252,16 @@ def fresh_election_kill_restart(binary, work, artifacts, cluster_type=Cluster):
         old_pid = killed.proc.pid
         killed.kill()
         saved = hard_state(killed.directory / "raft.state")
-        next_leader, rows = cluster.stable_leader(after_term=leader["term"], last=0)
+        next_leader, rows = cluster.stable_leader(after_term=leader["term"])
+        assert all(r["commit"] == r["last"] for r in rows), rows
         assert next_leader["id"] != killed.id
         evidence["after_kill"] = dict(killed_pid=old_pid, leader=next_leader,
                                       rows=rows, states=cluster.votes(next_leader))
         print(f"PASS processes: SIGKILL pid {old_pid}; node {next_leader['id']} elected term {next_leader['term']}", flush=True)
 
         killed.start()
-        joined, rows = cluster.stable_leader(after_term=leader["term"], last=0)
+        joined, rows = cluster.stable_leader(after_term=leader["term"])
+        assert all(r["commit"] == r["last"] for r in rows), rows
         restarted = next(r for r in rows if r["id"] == killed.id)
         assert restarted["pid"] != old_pid and restarted["term"] >= saved["term"]
         evidence["restart"] = dict(leader=joined, rows=rows, saved_before_restart=saved,
@@ -269,13 +280,17 @@ def old_log_catchup(binary, work, artifacts, cluster_type=Cluster):
         assert fixture_files(cluster.nodes[2].directory, 130) == expected
         fixture_files(cluster.nodes[3].directory, 0)
         cluster.start()
-        leader, rows = cluster.stable_leader(last=130, timeout=20)
+        leader, rows = cluster.stable_leader(timeout=20)
         assert leader["term"] > 1, leader
-        assert all(r["commit"] == 0 for r in rows), rows
+        #屏障 no-op 提交后，旧任期的 130 条前缀也就一并提交
+        assert rows[0]["last"] >= 131, rows
+        assert all(r["commit"] == r["last"] for r in rows), rows
         for node in cluster.nodes.values():
-            assert (node.directory / "raft.log").read_bytes() == expected, node.id
+            data = (node.directory / "raft.log").read_bytes()
+            assert data.startswith(expected), node.id
+            assert len(data) > len(expected), node.id
         states = cluster.votes(leader)
-        print("PASS processes: empty follower caught up 130 durable entries; old-term majority stayed uncommitted", flush=True)
+        print("PASS processes: empty follower caught up 130 durable entries; barrier committed the old prefix", flush=True)
         return dict(leader=leader, rows=rows, states=states, records=130)
     finally:
         cluster.close()

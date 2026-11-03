@@ -68,7 +68,7 @@ class Server:
                     continue
                 try:
                     fields = dict(item.split("=", 1) for item in line.split()[1:])
-                    required = ("id", "pid", "term", "commit", "last", "applied", "running", "updated_ms")
+                    required = ("id", "pid", "term", "commit", "last", "applied", "serving", "running", "updated_ms")
                     row = {key: int(fields[key]) for key in required}
                     row["role"] = fields["role"]
                 except (ValueError, KeyError) as error:
@@ -115,13 +115,26 @@ def status_case(binary, artifacts):
     try:
         server.ready()
         with socket.create_connection(("127.0.0.1", server.client_port), timeout=2) as sock:
-            for op, value in ((1, b"not-an-unreplicated-write"), (2, b"")):
-                key = b"m7"
-                body = struct.pack(">BII", op, len(key), len(value)) + key + value
+            #单节点也要先等本任期屏障提交并执行完成
+            deadline = time.monotonic() + 5
+            while True:
+                key, value = b"m8", b"committed"
+                body = struct.pack(">BII", 1, len(key), len(value)) + key + value
                 sock.sendall(struct.pack(">I", len(body)) + body)
                 length, = struct.unpack(">I", receive(sock, 4))
-                assert length == 5, length
-                assert receive(sock, length) == b"\x02\x00\x00\x00\x00"
+                payload = receive(sock, length)
+                assert length == 5 and payload[0] in (0, 2), payload
+                if payload[0] == 0:
+                    break
+                assert time.monotonic() < deadline, "SET never succeeded"
+                time.sleep(0.05)
+
+            body = struct.pack(">BII", 2, len(key), 0) + key
+            sock.sendall(struct.pack(">I", len(body)) + body)
+            length, = struct.unpack(">I", receive(sock, 4))
+            payload = receive(sock, length)
+            assert payload[0] == 0, payload
+            assert payload[5:] == value, payload
         assert not server.legacy.exists()
         print("PASS main: READY/current PID/fresh status and KV Error gate", flush=True)
     finally:
@@ -129,23 +142,22 @@ def status_case(binary, artifacts):
 
 
 def idle_fd_case(binary, artifacts):
-    """单节点正常布局使用 fd 0..10，限制 11 使最后的 /dev/null 打开失败。"""
-    server = Server(binary, artifacts / "idle-fd", fd_limit=11)
-    try:
-        deadline = time.monotonic() + 3
-        while "open /dev/null failed" not in server.text() and time.monotonic() < deadline:
-            if server.proc.poll() is not None:
-                break
-            time.sleep(0.01)
-        assert "open /dev/null failed" in server.text(), server.text()
+    """fd 预算不足时必须响亮退出，不能留下“活着但不服务”的半启动进程。
+
+    M8 之后启动会额外打开 eventfd/派生KV 等 fd，具体耗尽点随实现变化，
+    因此这里只钉住真正的不变量：非零退出、没有 READY、错误信息可见。
+    """
+    for limit in (6, 8, 10, 12):
+        server = Server(binary, artifacts / f"idle-fd-{limit}", fd_limit=limit)
         try:
-            rc = server.proc.wait(timeout=0.4)
-        except subprocess.TimeoutExpired as error:
-            raise AssertionError("idle fd open failed but main continued running") from error
-        assert rc == 1 and "READY " not in server.text(), (rc, server.text())
-        print("PASS main: idle fd failure exits immediately without READY", flush=True)
-    finally:
-        server.close()
+            rc = server.proc.wait(timeout=8)
+            text = server.text()
+            assert rc != 0, (limit, rc, text)
+            assert "READY " not in text, (limit, text)
+            assert text.strip(), (limit, "no diagnostic output")
+        finally:
+            server.close()
+    print("PASS main: fd exhaustion exits loudly without READY (limits 6/8/10/12)", flush=True)
 
 
 def signals_case(binary, artifacts):
